@@ -12,6 +12,7 @@ import { Readable, Transform, type TransformCallback } from 'node:stream';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { fetch as undiciFetch, ProxyAgent } from 'undici';
 import { retryTransient } from '../fetchRetry.js';
+import { cookieFile } from './cookies.js';
 import { resolveMedia, YouTubeError, type ResolvedMedia } from './ytdlp.js';
 
 /** A YouTube video id is exactly 11 URL-safe base64 characters. */
@@ -270,6 +271,7 @@ async function handleYouTube(
     const rangeHeader = request.headers.range;
     const range = parseRange(rangeHeader);
 
+    const startedAt = Date.now();
     let media: ResolvedMedia;
     try {
         media = await resolveMedia(videoId, audio);
@@ -310,6 +312,17 @@ async function handleYouTube(
             controller.signal
         );
     } catch (error) {
+        console.warn(
+            `[YouTube] ${videoId}${
+                audio ? '?audio=1' : ''
+            } -> 502 fetching media via ${
+                media.proxy
+                    ? `lane ${media.proxy.replace(/^https?:\/\//, '')}`
+                    : 'direct'
+            } in ${((Date.now() - startedAt) / 1000).toFixed(1)} s: ${
+                error instanceof Error ? error.message : String(error)
+            }`
+        );
         return sendError(
             reply,
             request,
@@ -324,15 +337,37 @@ async function handleYouTube(
     const { response } = upstream;
     const resolved = upstream.media;
 
+    // One line per resolve, naming the path that answered: with cookies first
+    // and the lanes behind them, "signed in and fast" and "the cookie died and
+    // a lane quietly covered for us" are otherwise identical from outside.
+    const via = resolved.proxy
+        ? `lane ${resolved.proxy.replace(/^https?:\/\//, '')}`
+        : cookieFile()
+          ? 'cookies-direct'
+          : 'direct';
+    console.log(
+        `[YouTube] ${videoId}${audio ? '?audio=1' : ''} -> ${response.status} via ${via} in ${(
+            (Date.now() - startedAt) /
+            1000
+        ).toFixed(1)} s`
+    );
+
     if (response.status >= 400) {
-        await response.body?.cancel().catch(() => undefined);
+        // googlevideo explains itself in the body ("expired", "not available",
+        // "sign in"). Keep a short, CRLF-flattened copy: it is the difference
+        // between a guess and a diagnosis, and it carries no credential.
+        const reason = (await response.text().catch(() => ''))
+            .replace(/\s+/g, ' ')
+            .slice(0, 200);
         return sendError(
             reply,
             request,
             502,
             'UPSTREAM_REJECTED',
-            `Media host answered ${response.status} for ${videoId}`,
-            { status: response.status }
+            `Media host answered ${response.status} for ${videoId}${
+                reason ? `: ${reason}` : ''
+            }`,
+            { status: response.status, via }
         );
     }
 

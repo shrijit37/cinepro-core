@@ -1,0 +1,68 @@
+name: youtube-health
+
+# The YouTube cookie jar is session-scoped: sign-out, a password change or
+# Google's own clock kills it, and the symptom is exactly the 502 this endpoint
+# was rebuilt to remove. The deploy gate only runs on deploys, so a rotten jar
+# would sit green for weeks while the panel says "Playback failed". This probe
+# asks production for a real audio byte-range every six hours and goes red the
+# moment it stops answering 206 — a red badge in this repo is the alert.
+#
+# It resolves the music id that needs the signed-in session (kJQP7kiw5Fk) with
+# a 1 KiB range, which is the cheapest request that still proves the whole
+# chain: cookie jar -> yt-dlp resolve -> media fetch -> a real MP4 `ftyp`.
+
+on:
+    schedule:
+        - cron: '17 */6 * * *'
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+jobs:
+    probe:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - name: Read the basic-auth credential from Doppler (platform/prd)
+              uses: dopplerhq/cli-action@v4
+              env:
+                  DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+
+            - name: Stream a music track from production
+              env:
+                  DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+                  APP_URL: https://cinepro-core.shrijit.tech
+              run: |
+                  set -euo pipefail
+                  AUTH=$(doppler secrets get CINEPRO_CORE_BASIC_AUTH -p platform -c prd --plain --silent)
+                  if [ -z "${AUTH:-}" ]; then
+                    echo "::error::CINEPRO_CORE_BASIC_AUTH is empty in Doppler platform/prd"
+                    exit 1
+                  fi
+                  echo "::add-mask::$AUTH"
+
+                  check() {
+                    local id=$1 code size brand ttfb
+                    out=$(curl -s -o probe.bin -w '%{http_code} %{time_starttransfer}' \
+                      --max-time 180 -u "$AUTH" -H 'Range: bytes=0-1023' \
+                      "$APP_URL/v1/youtube/$id?audio=1")
+                    read -r code ttfb <<<"$out"
+                    size=$(wc -c < probe.bin)
+                    brand=$(dd if=probe.bin bs=1 skip=4 count=4 2>/dev/null || true)
+                    echo "$id?audio=1 -> HTTP $code, $size bytes, brand '$brand', first byte ${ttfb}s"
+                    if [ "$code" != "206" ] || [ "$size" != "1024" ] || [ "$brand" != "ftyp" ]; then
+                      echo "::error::$id?audio=1 did not stream: HTTP $code, $size bytes, brand '$brand' — $(head -c 300 probe.bin | tr -d '\r')"
+                      return 1
+                    fi
+                    return 0
+                  }
+
+                  fail=0
+                  # kJQP7kiw5Fk is the id the WARP lanes cannot resolve, so it is
+                  # the one that proves the signed-in path is actually in use; the
+                  # second id proves the endpoint still serves an ordinary one.
+                  check kJQP7kiw5Fk || fail=1
+                  check zAiIgYOH4Ys || fail=1
+                  rm -f probe.bin
+                  [ "$fail" = "0" ] || exit 1

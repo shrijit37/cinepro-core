@@ -198,6 +198,23 @@ line) and redeploying; the container is recreated, so the new jar is written on
 boot. CI fails the deploy if the key is empty, because unsigned this endpoint
 answers 502 for the music ids.
 
+**Each resolve says which path answered.** One line per request:
+
+```
+[YouTube] zAiIgYOH4Ys?audio=1 -> 206 via cookies-direct in 1.4 s
+[YouTube] zAiIgYOH4Ys?audio=1 -> 206 via lane cinepro-lane-egress:8002 in 3.9 s
+```
+
+That is the only way to tell "cookies are working" from "the cookie died and a
+lane quietly covered for me", and a 502 names the same path plus the first 200
+characters of googlevideo's own explanation (`error.details.via` carries it too).
+A 403/410 from the media host triggers one forced re-resolve before the 502 —
+measured once, right after the first deploy that carried the cookie jar, every
+id resolved and then answered 403 for a few minutes while YouTube digested a
+session that had never been seen from this address; the same URLs streamed
+normally minutes later. If that window ever reappears, the `via` line says
+whether the URL was minted direct or on a lane.
+
 **A cold resolve is one race, not a sweep.** `src/youtube/ytdlp.ts` iterates
 the *client* candidates outermost and races every lane in parallel for the
 chosen candidate, aborting the losers — the client set that worked for the
@@ -387,6 +404,17 @@ Measured behaviour of this axis, for the next person:
   shape the TV's music screen plays — and both the video variant and the audio
   variant for `dQw4w9WgXcQ`. The music ids' *video* variant is not a product
   path and is bot-checked independently, so it is not gated.
+
+## The rot probe
+
+`.github/workflows/youtube-health.yml` runs every six hours (and on demand) and
+asks production for a real 1 KiB audio range of `kJQP7kiw5Fk` (the id the lanes
+cannot resolve, so it proves the signed-in path is in use) and of
+`zAiIgYOH4Ys`, asserting `206`, 1024 bytes and `ftyp` at byte 4. A session
+cookie set dies silently — sign-out, a password change, Google's own clock — and
+the panel would only show "Playback failed". The probe's red badge is the
+alert; there is no extra infrastructure. It reads `CINEPRO_CORE_BASIC_AUTH`
+from Doppler with the same `DOPPLER_TOKEN` secret the deploy uses.
 
 ## Secrets
 
