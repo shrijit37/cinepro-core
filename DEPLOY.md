@@ -82,8 +82,25 @@ shape and no dependency probes — `status` is the framework's literal
 a liveness signal only. What actually proves the service works is: the `version`
 field (which this fork sets from the `APP_VERSION` build arg, so it carries the
 running commit's SHA — the previous container answers while the new one starts,
-so liveness alone would prove nothing) and gate 2's authenticated resolve. There
-is no `checks` object to poll.
+so liveness alone would prove nothing), gate 2's authenticated resolve, and gate
+3's end-to-end fetch of a real media segment. There is no `checks` object to
+poll.
+
+## Two upstream behaviours this fork works around
+
+- **VidApi media headers** (`src/providers/vidapi/vidapi.ts`). The CDN serving
+  `stream_urls` sits behind Cloudflare and answers `403 Attention Required` for
+  any request carrying a `Referer` or `Origin` — including the iframe referer
+  the provider itself needs for its API. Stream URLs therefore embed only
+  `User-Agent` and `Accept`. Putting the iframe referer back on media keeps the
+  playlists looking healthy (master and variant both 200) while every segment
+  403s — that is exactly how three "1080p VidApi sources" came to be unplayable.
+- **TMDB connection resets** (`src/fetchRetry.ts`). From the Dokploy host the
+  TMDB validation fetch intermittently dies mid-response (`read ECONNRESET`,
+  errno -104), which the framework surfaced as a 500 before a single provider
+  ran. `installFetchRetry()` (called at the top of `src/server.ts`) retries
+  idempotent `GET`/`HEAD` fetch failures once after 250 ms; anything else
+  propagates unchanged.
 
 ## Secrets
 
@@ -152,6 +169,9 @@ the image `release.yml` used to, and the Codeberg mirror needs a
 | gate 2 sees `200` on an anonymous path | the middleware is not attached: `domain.byComposeId` should list `cinepro-core-auth@file` under `middlewares`, and `/etc/dokploy/traefik/dynamic/middlewares.yml` should define `cinepro-core-auth` |
 | gate 2 sees `401` on a *authenticated* path | the credential in Doppler `CINEPRO_CORE_BASIC_AUTH` no longer matches the bcrypt hash in the middleware config |
 | gate 2 sees a resolve with 0 sources, or a `500` whose log says `[TMDBService] Error validating movie: TypeError: fetch failed` (`read ECONNRESET`) | TMDB unreachable from the container at that moment (seen once, transient, straight after a container recreate) or the key is empty/rotated; the providers are third-party scrapers and are the flakiest part of the service, which is why gate 2 retries for 180 s |
+| gate 3: first segment `403`, body `Attention Required \| Cloudflare` | the media fetch is carrying a `Referer`/`Origin`: the CDN's hotlink rule rejects both. The provider must embed media headers without them (see "Two upstream behaviours") |
+| gate 3: first segment returns HTML (first byte not `0x47`) or is tiny | the playlist advertises pages instead of media — provider rot. Gate 3 exists so this never ships as "working" again |
+| gate 3: master 200 with no variants, or media playlist with no segments | the provider returned a stub playlist; check the resolve diagnostics for the provider's own error |
 | `Unresolved vault reference` in Dokploy's deploy log | an env value was replaced with a `{{vault.*}}` ref by hand; this stack resolves no vault refs |
 | deploy green but the domain serves the old build | `compose.deploy` must be called, not `application.redeploy`; and the gate must require this run's SHA (a one-shot liveness check passes against the previous container) |
 | container running but the domain 404s | the domain's `serviceName` must equal the compose service key (`cinepro-core`) and its port must equal the app's `PORT` (3210) |
@@ -163,6 +183,18 @@ curl -s -o /dev/null -w '%{http_code}\n' https://cinepro-core.shrijit.tech/v1/he
 curl -s -u "$(doppler secrets get CINEPRO_CORE_BASIC_AUTH -p platform -c prd --plain --silent)" \
   https://cinepro-core.shrijit.tech/v1/health | jq -r '.status, .version'                       # operational, <sha>
 curl -s -u "$AUTH" https://cinepro-core.shrijit.tech/v1/movies/550 | jq -r '.sources[] | "\(.quality) \(.provider.name) \(.type)"'
+```
+
+Resolving is not playback — walk the playlist chain, because a healthy-looking
+master can still advertise pages:
+
+```
+BASE=https://cinepro-core.shrijit.tech; AUTH=…
+MASTER=$(curl -s -u "$AUTH" $BASE/v1/movies/550 | jq -r '.sources[0].url')
+VAR=$(curl -s -u "$AUTH" "$MASTER" | grep -v '^#' | head -1)
+SEG=$(curl -s -u "$AUTH" "$BASE$VAR" | grep -v '^#' | head -1)
+curl -s -u "$AUTH" "$BASE$SEG" -o /tmp/seg.bin          # want 200 + ~750 KB
+head -c 1 /tmp/seg.bin | od -An -tx1                    # want 47 (MPEG-TS sync)
 ```
 
 ## What goes in git and what never does

@@ -252,3 +252,32 @@ jobs:
           done
           echo "::error::gate failed — /v1/movies/550 returned no sources"
           exit 1
+
+      - name: Gate 3 — the resolved source actually serves media
+        run: |
+          set -euo pipefail
+          # Resolving is not the product, playback is. A provider can hand back
+          # an HLS master whose entries are HTML pages: VidApi did exactly that
+          # (three 1080p sources, every segment a `page-N.html` answering 403)
+          # because the iframe Referer it sent tripped the CDN's hotlink rule.
+          # Walk the chain the player walks and require real MPEG-TS bytes.
+          abs() { case "$1" in http*) printf '%s' "$1" ;; *) printf '%s%s' "$APP_URL" "$1" ;; esac; }
+          body=$(curl -fsS --max-time 120 -u "$BASIC_AUTH" "$APP_URL/v1/movies/550")
+          master=$(printf '%s' "$body" | jq -r '.sources[0].url // empty')
+          [ -n "$master" ] || { echo "::error::/v1/movies/550 returned no source URL"; exit 1; }
+          echo "source: ${master:0:110}…"
+          playlist=$(curl -fsS --max-time 60 -u "$BASIC_AUTH" "$(abs "$master")")
+          variant=$(printf '%s' "$playlist" | grep -v '^#' | head -1)
+          [ -n "$variant" ] || { echo "::error::master playlist listed no variants"; exit 1; }
+          echo "variant: ${variant:0:110}…"
+          media=$(curl -fsS --max-time 60 -u "$BASIC_AUTH" "$(abs "$variant")")
+          segment=$(printf '%s' "$media" | grep -v '^#' | head -1)
+          [ -n "$segment" ] || { echo "::error::media playlist listed no segments"; exit 1; }
+          echo "segment: ${segment:0:110}…"
+          code=$(curl -s -o seg.bin -w '%{http_code}' --max-time 90 -u "$BASIC_AUTH" "$(abs "$segment")")
+          size=$(wc -c < seg.bin)
+          first=$(head -c 1 seg.bin | od -An -tx1 | tr -d ' \n')
+          echo "first segment -> HTTP $code, $size bytes, first byte 0x$first"
+          [ "$code" = "200" ] || { echo "::error::first segment returned HTTP $code"; exit 1; }
+          [ "$size" -gt 100000 ] || { echo "::error::first segment is only $size bytes — not media"; exit 1; }
+          [ "$first" = "47" ] || { echo "::error::first segment does not start with the MPEG-TS sync byte (0x47) — the playlist is not media"; exit 1; }

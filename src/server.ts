@@ -2,8 +2,12 @@ import { OMSSServer } from '@omss/framework';
 import 'dotenv/config';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { installFetchRetry } from './fetchRetry.js';
 import { knownThirdPartyProxies } from './thirdPartyProxies.js';
 import { streamPatterns } from './streamPatterns.js';
+
+// Must be installed before the server issues its first upstream request.
+installFetchRetry();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

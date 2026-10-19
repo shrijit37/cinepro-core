@@ -25,6 +25,20 @@ export class VidApiProvider extends BaseProvider {
         Accept: '*/*'
     };
 
+    /**
+     * Headers embedded in the proxied media URLs.
+     *
+     * The CDN serving `stream_urls` sits behind Cloudflare and rejects *any*
+     * Referer/Origin with "403 Attention Required" — its hotlink rule fires on
+     * the iframe Referer that this provider needs for its own API. Measured
+     * against a live segment: 200 + MPEG-TS with no Referer, 403 with either
+     * brightpathsignals.com or the CDN's own origin as Referer. So the media
+     * URLs carry only the User-Agent and Accept.
+     */
+    private mediaHeaders(): Record<string, string> {
+        return { 'User-Agent': this.HEADERS['User-Agent'], Accept: '*/*' };
+    }
+
     readonly capabilities: ProviderCapabilities = {
         supportedContentTypes: ['movies', 'tv']
     };
@@ -81,7 +95,10 @@ export class VidApiProvider extends BaseProvider {
                             : 'hls';
 
                     return {
-                        url: this.createProxyUrl(streamUrl, this.HEADERS),
+                        url: this.createProxyUrl(
+                            streamUrl,
+                            this.mediaHeaders()
+                        ),
                         type: sourceType,
                         quality: this.inferQuality(data.file_name),
                         audioTracks: [
