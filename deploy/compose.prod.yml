@@ -1,0 +1,19 @@
+# CinePro Core — production stack for the Dokploy host.
+# Owned by CI (.github/workflows/build-deploy.yml): it substitutes the
+# placeholder token in this file with ghcr.io/shrijit37/cinepro-core:<full-sha>
+# and pushes the result to Dokploy through compose.update. Never hand-edit the
+# image tag in Dokploy — the pipeline owns that field.
+#
+# deployed-build: __IMAGE__
+services:
+  cinepro-core:
+    image: __IMAGE__
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - dokploy-network
+
+networks:
+  dokploy-network:
+    external: true

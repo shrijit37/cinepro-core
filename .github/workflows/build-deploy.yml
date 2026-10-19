@@ -1,0 +1,215 @@
+name: build-deploy
+
+# Build CinePro Core, publish the image to GHCR, pin it in the Dokploy compose
+# app, roll that app, then gate on: the running build reports this commit's SHA,
+# anonymous callers are refused (Traefik basic auth on the router), and a real
+# resolve still returns sources.
+#
+# Nothing is built on the server: Dokploy pulls the SHA-tagged image. The
+# compose app is a *compose* app and not a Dokploy *application* because on this
+# Dokploy build (v0.30.8) an application created from a git source cannot be
+# made to pull a CI image — `application.saveDockerProvider` returns true while
+# the deploy still runs a source build. See DEPLOY.md.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-deploy-main
+  cancel-in-progress: false
+
+env:
+  APP_URL: https://cinepro-core.shrijit.tech
+  DOKPLOY_URL: ${{ vars.DOKPLOY_URL || 'https://manage.shrijit.tech' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx prettier --check src
+
+  build:
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Both platforms: the Dokploy host is linux/arm64.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # APP_VERSION is what /v1/health reports as `version`; the gate below
+          # asserts it, so a stale container can never pass as this build.
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+            REVISION=${{ github.sha }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}:latest
+
+  deploy:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read app secrets from Doppler (platform/prd)
+        uses: dopplerhq/cli-action@v4
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+      - name: Load secrets
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+        run: |
+          set -euo pipefail
+          # One download, then read the two keys this pipeline needs. The TMDB
+          # key is the service's own credential; the basic-auth credential is
+          # what the Traefik middleware was built from.
+          doppler secrets download --no-file --format json --silent > /tmp/doppler.json
+          TMDB=$(jq -r '.CINEPRO_TMDB_API_KEY // empty' /tmp/doppler.json)
+          AUTH=$(jq -r '.CINEPRO_CORE_BASIC_AUTH // empty' /tmp/doppler.json)
+          if [ -z "$TMDB" ]; then
+            echo "::error::CINEPRO_TMDB_API_KEY is empty in Doppler platform/prd — refusing to deploy a Core that cannot resolve anything"
+            exit 1
+          fi
+          if [ -z "$AUTH" ]; then
+            echo "::error::CINEPRO_CORE_BASIC_AUTH is empty in Doppler platform/prd — the auth gate cannot run"
+            exit 1
+          fi
+          echo "::add-mask::$TMDB"
+          echo "::add-mask::$AUTH"
+          {
+            echo "TMDB_API_KEY=$TMDB"
+            echo "BASIC_AUTH=$AUTH"
+          } >> "$GITHUB_ENV"
+          rm -f /tmp/doppler.json
+          echo "loaded ${{ github.repository }} app secrets from Doppler platform/prd"
+
+      - name: Pin the compose app to this build
+        env:
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+          COMPOSE_ID: ${{ vars.DOKPLOY_COMPOSE_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${COMPOSE_ID:-}" ]; then
+            echo "::error::repo variable DOKPLOY_COMPOSE_ID is not set"
+            exit 1
+          fi
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:$GITHUB_SHA"
+          # deploy/compose.prod.yml is the single source of truth; __IMAGE__ is
+          # the only thing substituted. Dokploy's stored copy is pipeline-owned.
+          jq -n --rawfile compose deploy/compose.prod.yml --arg img "$IMAGE" \
+            '$compose | gsub("__IMAGE__"; $img)' --raw-output > /tmp/compose.yml
+          jq -nc --arg id "$COMPOSE_ID" --rawfile file /tmp/compose.yml \
+            '{composeId: $id, composeFile: $file}' > /tmp/payload.json
+          curl -fsS -X POST "$DOKPLOY_URL/api/compose.update" \
+            -H "x-api-key: $DOKPLOY_API_KEY" -H 'Content-Type: application/json' \
+            -d @/tmp/payload.json >/dev/null
+          echo "compose file pinned to $IMAGE"
+
+      - name: Re-assert the app env
+        env:
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+          COMPOSE_ID: ${{ vars.DOKPLOY_COMPOSE_ID }}
+        run: |
+          set -euo pipefail
+          # Dokploy's provider sync can clear an app's env block, so it is
+          # re-asserted from deploy/app.env on every deploy. No secret is in
+          # that file: __TMDB_API_KEY__ is substituted from Doppler here.
+          jq -n --rawfile env deploy/app.env --arg key "$TMDB_API_KEY" \
+            '$env | gsub("__TMDB_API_KEY__"; $key)' --raw-output > /tmp/app.env
+          jq -nc --arg id "$COMPOSE_ID" --rawfile env /tmp/app.env \
+            '{composeId: $id, env: $env, createEnvFile: true}' > /tmp/payload.json
+          curl -fsS -X POST "$DOKPLOY_URL/api/compose.saveEnvironment" \
+            -H "x-api-key: $DOKPLOY_API_KEY" -H 'Content-Type: application/json' \
+            -d @/tmp/payload.json >/dev/null
+          echo "app env re-asserted ($(grep -c '=' /tmp/app.env) keys)"
+          rm -f /tmp/app.env /tmp/payload.json
+
+      - name: Roll the compose app
+        env:
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+          COMPOSE_ID: ${{ vars.DOKPLOY_COMPOSE_ID }}
+        run: |
+          set -euo pipefail
+          # compose.deploy pulls the pinned image and recreates the container.
+          # (`application.redeploy` is the call that silently no-ops; this is a
+          # compose app, so compose.deploy is the roll.)
+          curl -fsS -X POST "$DOKPLOY_URL/api/compose.deploy" \
+            -H "x-api-key: $DOKPLOY_API_KEY" -H 'Content-Type: application/json' \
+            -d "$(jq -nc --arg id "$COMPOSE_ID" --arg title "CI ${GITHUB_SHA:0:7}" '{composeId: $id, title: $title}')"
+
+      - name: Gate 1 — the running build is this SHA
+        run: |
+          set -euo pipefail
+          # 600s: Let's Encrypt issues on first deploy, and the previous
+          # container keeps answering while the new one starts — so liveness
+          # alone proves nothing and the loop must require THIS sha.
+          deadline=$((SECONDS + 600))
+          while [ $SECONDS -lt $deadline ]; do
+            body=$(curl -fsS --max-time 15 -u "$BASIC_AUTH" "$APP_URL/v1/health" || true)
+            version=$(jq -r '.version // empty' <<<"${body:-{}}" 2>/dev/null || true)
+            if [ "$version" = "$GITHUB_SHA" ]; then
+              echo "health reports $version — gate passed"
+              echo "anonymous /v1/health -> $(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$APP_URL/v1/health")"
+              exit 0
+            fi
+            echo "waiting: health version=${version:-<none>} want=$GITHUB_SHA"
+            sleep 8
+          done
+          echo "::error::gate failed — $APP_URL/v1/health never reported $GITHUB_SHA"
+          exit 1
+
+      - name: Gate 2 — anonymous access is refused, authenticated resolve works
+        run: |
+          set -euo pipefail
+          fail=0
+          for path in /v1/health /v1/movies/550 "/v1/proxy?data=x"; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$APP_URL$path" || true)
+            echo "anonymous $path -> $code"
+            [ "$code" = "401" ] || { echo "::error::anonymous $path returned $code, expected 401"; fail=1; }
+          done
+          [ "$fail" = "0" ] || exit 1
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -u "$BASIC_AUTH" "$APP_URL/v1/health")
+          echo "authenticated /v1/health -> $code"
+          [ "$code" = "200" ] || { echo "::error::authenticated health returned $code"; exit 1; }
+          # The resolve is the point of the service: providers are third-party
+          # and slow, so this one gets a long deadline.
+          deadline=$((SECONDS + 180))
+          while [ $SECONDS -lt $deadline ]; do
+            body=$(curl -fsS --max-time 120 -u "$BASIC_AUTH" "$APP_URL/v1/movies/550" || true)
+            count=$(jq -r '(.sources // []) | length' <<<"${body:-{}}" 2>/dev/null || echo 0)
+            if [ "${count:-0}" -gt 0 ]; then
+              echo "authenticated /v1/movies/550 -> $count source(s)"
+              jq -r '.sources[] | "  \(.quality) \(.provider.name // .provider.id) (\(.type))"' <<<"$body"
+              exit 0
+            fi
+            echo "resolve returned ${count:-0} sources, retrying"
+            sleep 10
+          done
+          echo "::error::gate failed — /v1/movies/550 returned no sources"
+          exit 1
