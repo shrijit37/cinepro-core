@@ -22,22 +22,30 @@ const execFileAsync = promisify(execFile);
 
 const YTDLP_BIN = process.env.YTDLP_PATH ?? 'yt-dlp';
 /**
- * Client families, best first. `android` is the only one that still advertises
- * **muxed** progressive MP4 (format 18/22), which is what a plain HTTP player
- * can play; `ios`/`android_vr`/`mweb` are the families that pass YouTube's
- * player request without cookies from a datacenter IP. `tv_embedded` and
- * `web_safari` are deliberately *not* here — they are the two clients YouTube
- * bot-checks hardest ("Sign in to confirm you're not a bot", which is what made
- * /v1/youtube/* answer 502 for every music video).
+ * Client families are per variant, because the two selectors need different
+ * things and forcing a list changes what yt-dlp offers:
+ *
+ * - Video needs **muxed** progressive MP4 (format 18/22) — a single video+audio
+ *   stream, since a plain HTTP player cannot mux split tracks. Only the
+ *   `android` family still advertises those: `-f "b[ext=mp4][height<=720]"` on
+ *   `default`/`ios`/`mweb` answers "Requested format is not available".
+ * - Audio only needs an m4a track, and yt-dlp's own `default` rotation finds it
+ *   without forcing anything (measured on the owner's failing track:
+ *   `bestaudio[ext=m4a]` downloaded 4.16 MiB complete with no extractor args).
+ *
+ * `tv_embedded` and `web_safari` are deliberately absent: they are the two
+ * clients YouTube bot-checks hardest, and forcing them is what made
+ * /v1/youtube/* answer 502 for every music video.
  */
-const PLAYER_CLIENTS =
-    process.env.YTDLP_PLAYER_CLIENT ?? 'android,ios,android_vr,mweb';
+const VIDEO_CLIENTS = process.env.YTDLP_VIDEO_CLIENTS ?? 'android';
+const AUDIO_CLIENTS = process.env.YTDLP_AUDIO_CLIENTS ?? 'default';
 /**
  * Tried in order when the preferred set yields no usable format: a resolve that
  * fails on one family today may pass on another, and the endpoint must not
  * answer 502 because a single client family went dark.
  */
-const CLIENT_FALLBACKS = [PLAYER_CLIENTS, 'android', 'ios,mweb', 'default'];
+const VIDEO_CLIENT_FALLBACKS = [VIDEO_CLIENTS, 'android', 'android_vr'];
+const AUDIO_CLIENT_FALLBACKS = [AUDIO_CLIENTS, 'android', 'ios,web'];
 /**
  * The `bgutil` PoToken provider (a second compose service, see
  * deploy/compose.prod.yml). From a datacenter IP YouTube answers the player
@@ -255,7 +263,10 @@ async function resolveUncached(
         `yt-dlp could not resolve ${videoId}`,
         502
     );
-    for (const clients of CLIENT_FALLBACKS) {
+    const clientFallbacks = audio
+        ? AUDIO_CLIENT_FALLBACKS
+        : VIDEO_CLIENT_FALLBACKS;
+    for (const clients of clientFallbacks) {
         try {
             return await attemptResolve(videoId, audio, clients);
         } catch (error) {
