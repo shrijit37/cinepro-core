@@ -177,6 +177,17 @@ monthly, so `yt-dlp` is **pinned** in the Dockerfile
 (`ARG YTDLP_VERSION=2026.08.19`) and gate 4 streams real bytes before a deploy
 is called green. Bump the pin only in a commit that re-runs that gate.
 
+**A cold resolve is one race, not a sweep.** `src/youtube/ytdlp.ts` iterates
+the *client* candidates outermost and races every lane in parallel for the
+chosen candidate, aborting the losers — the client set that worked for the
+previous id of the same variant is tried first, and audio ships the single
+candidate `default` (the only one that yields an m4a track; the others answer
+"Requested format is not available" after ~2 s each). Before that, the loop was
+lane-major × five audio candidates, so a cold id cost up to 20 yt-dlp runs:
+measured production TTFB for `?audio=1` was 1.4 s cached, 14.5 s and 35.7 s
+cold. Gate 4 now fails a first byte slower than 20 s, so that regression cannot
+come back green.
+
 **Client families are per variant, and that is load-bearing.** Forcing one
 `player_client` list for both variants is exactly how music videos ended up
 answering `502` for a week: a list that satisfies `bestaudio[ext=m4a]` does not

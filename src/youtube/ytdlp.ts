@@ -39,15 +39,19 @@ const YTDLP_BIN = process.env.YTDLP_PATH ?? 'yt-dlp';
  */
 const VIDEO_CLIENTS =
     process.env.YTDLP_VIDEO_CLIENTS ?? 'android;web_embedded;mweb;android_vr';
-const AUDIO_CLIENTS =
-    process.env.YTDLP_AUDIO_CLIENTS ??
-    'default;web_embedded;mweb;android;ios+web';
+const AUDIO_CLIENTS = process.env.YTDLP_AUDIO_CLIENTS ?? 'default';
 /**
  * Candidate client sets, tried in order until one yields a usable format. `;`
  * separates candidates so a candidate may still contain yt-dlp's own `,` list
  * (`ios+web` is spelled with `+` because a comma there would split it wrong).
  * The list is env-overridable on purpose: when YouTube moves the goalposts the
  * fix is a new candidate order, and that must not need a rebuild to find out.
+ *
+ * Audio ships `default` alone because it is the only audio candidate that
+ * yields an m4a track: measured on two ids, `web_embedded`, `mweb`, `android`
+ * and `ios,web` all answer "Requested format is not available" after ~2 s
+ * each. Shipping them cost up to four wasted yt-dlp runs per lane on every
+ * cold id, which is what made a cold resolve take 14-35 s.
  *
  * Every candidate is tried (they are cheap, ~2-4 s each) because the failing
  * axis differs per video: an unattested `android` request is fine from a
@@ -260,7 +264,8 @@ async function attemptResolve(
     videoId: string,
     audio: boolean,
     clients: string,
-    proxy: string
+    proxy: string,
+    signal?: AbortSignal
 ): Promise<ResolvedMedia> {
     const args = [
         // Deliberately no `--no-warnings`: the PoToken plugin's warnings
@@ -290,11 +295,13 @@ async function attemptResolve(
     try {
         const result = await execFileAsync(YTDLP_BIN, args, {
             timeout: RESOLVE_TIMEOUT_MS,
-            maxBuffer: MAX_OUTPUT_BYTES
+            maxBuffer: MAX_OUTPUT_BYTES,
+            signal
         });
         stdout = result.stdout;
     } catch (error) {
-        const stderr = stderrForLog(error);
+        // A lane that lost the race was killed on purpose; its stderr is noise.
+        const stderr = signal?.aborted ? '' : stderrForLog(error);
         if (stderr) {
             console.warn(
                 `[YouTube] yt-dlp stderr for ${videoId} (clients ${clients}):\n${stderr}`
@@ -356,68 +363,143 @@ function isProxyFailure(error: unknown): boolean {
     return PROXY_UNREACHABLE_RE.test(message);
 }
 
+type EgressOutcome =
+    | { ok: ResolvedMedia }
+    | { error: unknown; unreachable: number; total: number };
+
+/**
+ * Race every configured egress for one client candidate and take the first
+ * answer. Lanes are the slow axis — a lane that refuses a video spends ~2 s
+ * before saying so — so trying them one after another multiplied the cold cost
+ * by the lane count. The losers are aborted as soon as a winner exists.
+ */
+async function attemptAcrossEgresses(
+    videoId: string,
+    audio: boolean,
+    clients: string
+): Promise<EgressOutcome> {
+    // `''` keeps the no-proxy path identical to the pre-lane behaviour.
+    const egresses = PROXIES.length > 0 ? PROXIES : [''];
+    if (egresses.length === 1) {
+        const proxy = egresses[0];
+        try {
+            return {
+                ok: await attemptResolve(videoId, audio, clients, proxy)
+            };
+        } catch (error) {
+            return {
+                error,
+                unreachable: proxy && isProxyFailure(error) ? 1 : 0,
+                total: proxy ? 1 : 0
+            };
+        }
+    }
+
+    const controller = new AbortController();
+    let unreachable = 0;
+    const attempts = egresses.map(async (proxy) => {
+        try {
+            const media = await attemptResolve(
+                videoId,
+                audio,
+                clients,
+                proxy,
+                controller.signal
+            );
+            controller.abort(); // the rest have nothing left to prove
+            return media;
+        } catch (error) {
+            if (!controller.signal.aborted && isProxyFailure(error)) {
+                unreachable += 1;
+            }
+            throw error;
+        }
+    });
+    try {
+        return { ok: await Promise.any(attempts) };
+    } catch (error) {
+        const errors = error instanceof AggregateError ? error.errors : [error];
+        return {
+            error: errors.at(-1) ?? error,
+            unreachable,
+            total: egresses.length
+        };
+    }
+}
+
+/**
+ * The client set that resolved the previous id of the same variant, tried
+ * first. YouTube's refusals move per video, not per client set, so the set that
+ * worked seconds ago is the best first guess for the next id; when it is wrong
+ * the cost is one race (~2-3 s), not a full sweep.
+ */
+const lastGoodClients: Record<'audio' | 'video', string | null> = {
+    audio: null,
+    video: null
+};
+
+function orderedClients(
+    candidates: string[],
+    variant: 'audio' | 'video'
+): string[] {
+    const preferred = lastGoodClients[variant];
+    if (!preferred || !candidates.includes(preferred)) {
+        return candidates;
+    }
+    return [preferred, ...candidates.filter((entry) => entry !== preferred)];
+}
+
 async function resolveUncached(
     videoId: string,
     audio: boolean
 ): Promise<ResolvedMedia> {
+    const variant = audio ? 'audio' : 'video';
+    const clientFallbacks = audio
+        ? AUDIO_CLIENT_FALLBACKS
+        : VIDEO_CLIENT_FALLBACKS;
     let lastError: unknown = new YouTubeError(
         'YTDLP_FAILED',
         `yt-dlp could not resolve ${videoId}`,
         502
     );
-    const clientFallbacks = audio
-        ? AUDIO_CLIENT_FALLBACKS
-        : VIDEO_CLIENT_FALLBACKS;
-    // `''` keeps the no-proxy path identical to the pre-lane behaviour.
-    const egresses = PROXIES.length > 0 ? PROXIES : [''];
-    let proxyFailures = 0;
-    for (const proxy of egresses) {
-        for (const clients of clientFallbacks) {
-            try {
-                const media = await attemptResolve(
-                    videoId,
-                    audio,
-                    clients,
-                    proxy
-                );
-                if (proxy) {
-                    console.log(
-                        `[YouTube] resolved ${videoId} (${
-                            audio ? 'audio' : 'video'
-                        }) via client ${clients} through egress ${proxy}`
-                    );
-                }
-                return media;
-            } catch (error) {
-                lastError = error;
-                if (proxy && isProxyFailure(error)) {
-                    proxyFailures += 1;
-                    console.warn(
-                        `[YouTube] egress ${proxy} unreachable for ${videoId}: ${
-                            error instanceof Error
-                                ? error.message
-                                : String(error)
-                        }`
-                    );
-                    break; // this lane is down; rotating is the only move
-                }
-                console.warn(
-                    `[YouTube] resolve failed for ${videoId} with clients ${clients}${
-                        proxy ? ` via egress ${proxy}` : ''
-                    }: ${error instanceof Error ? error.message : String(error)}`
+    // Client-major, egress-parallel: the common case is one client that works,
+    // so a cold id costs one race instead of one yt-dlp run per lane per
+    // candidate (measured before this: 14 s and 35 s TTFB on cold ids, against
+    // 1.4 s cached).
+    for (const clients of orderedClients(clientFallbacks, variant)) {
+        const outcome = await attemptAcrossEgresses(videoId, audio, clients);
+        if ('ok' in outcome) {
+            const media = outcome.ok;
+            lastGoodClients[variant] = clients;
+            if (media.proxy) {
+                console.log(
+                    `[YouTube] resolved ${videoId} (${variant}) via client ${clients} through egress ${media.proxy}`
                 );
             }
+            return media;
         }
-    }
-    if (PROXIES.length > 0 && proxyFailures === PROXIES.length) {
-        throw new YouTubeError(
-            'YTDLP_PROXY_UNREACHABLE',
-            `every configured egress refused ${videoId}: ${PROXIES.join(', ')} (${
+        lastError = outcome.error;
+        if (outcome.total > 0 && outcome.unreachable === outcome.total) {
+            // Every lane refused the TCP connection: a dead sidecar, which no
+            // client set can work around.
+            throw new YouTubeError(
+                'YTDLP_PROXY_UNREACHABLE',
+                `every configured egress refused ${videoId}: ${PROXIES.join(
+                    ', '
+                )} (${
+                    lastError instanceof Error
+                        ? lastError.message
+                        : String(lastError)
+                })`,
+                503
+            );
+        }
+        console.warn(
+            `[YouTube] resolve failed for ${videoId} with clients ${clients}: ${
                 lastError instanceof Error
                     ? lastError.message
                     : String(lastError)
-            })`,
-            503
+            }`
         );
     }
     throw lastError;

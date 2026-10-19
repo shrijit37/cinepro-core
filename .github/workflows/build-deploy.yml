@@ -342,14 +342,25 @@ jobs:
           # uses: a megabyte at the start, a 1 KiB head range, and a mid-file
           # range derived from the total the server reports.
           check_stream() {
-            local id=$1 suffix=$2 want_brand=$3 code size total half end brand crange
+            local id=$1 suffix=$2 want_brand=$3 code size total half end brand crange ttfb out
             local url="$APP_URL/v1/youtube/$id$suffix"
-            code=$(curl -s -D yt_headers.txt -o yt_first.bin -w '%{http_code}' --max-time 180 \
+            out=$(curl -s -D yt_headers.txt -o yt_first.bin -w '%{http_code} %{time_starttransfer}' --max-time 180 \
               -u "$BASIC_AUTH" -H 'Range: bytes=0-1048575' "$url")
+            read -r code ttfb <<<"$out"
             size=$(wc -c < yt_first.bin)
             total=$(grep -i '^content-range:' yt_headers.txt | tr -d '\r' | sed -E 's#.*/##')
-            echo "  $id$suffix  range 0-1048575 -> HTTP $code, $size bytes, total ${total:-?}"
+            echo "  $id$suffix  range 0-1048575 -> HTTP $code, $size bytes, total ${total:-?}, ttfb ${ttfb}s"
             [ "$code" = "206" ] || { echo "::error::$id$suffix: expected 206, got $code: $(body yt_first.bin)"; return 1; }
+            # Latency is part of the contract: a cold resolve that sweeps every
+            # lane × client used to answer the first byte in 14-35 s, and the TV
+            # shows that as a hang.
+            if awk -v t="$ttfb" 'BEGIN { exit !(t > 20) }'; then
+              echo "::error::$id$suffix: first byte after ${ttfb}s — a cold resolve must stay under 20 s"
+              return 1
+            fi
+            if awk -v t="$ttfb" 'BEGIN { exit !(t > 10) }'; then
+              echo "::warning::$id$suffix: first byte after ${ttfb}s — cold resolve is slow"
+            fi
             [ "$size" = "1048576" ] || { echo "::error::$id$suffix: expected 1048576 bytes, got $size"; return 1; }
             case "$total" in ''|*[!0-9]*) echo "::error::$id$suffix: no usable Content-Range total"; return 1 ;; esac
 
