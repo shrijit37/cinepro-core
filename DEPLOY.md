@@ -11,6 +11,7 @@ git push main
       → ghcr.io/shrijit37/cinepro-core:<full sha> and :latest
   → Dokploy compose.update: pin <sha> in deploy/compose.prod.yml (env untouched)
   → Dokploy compose.saveEnvironment: re-assert deploy/app.env, TMDB key from Doppler
+  → Dokploy domain.update: re-assert cinepro-core.shrijit.tech + cinepro-core-auth@file
   → Dokploy compose.deploy: pull + recreate the container
   → gate 1: GET /v1/health (basic auth) until version == <sha>            (600 s)
   → gate 2: anonymous /v1/health, /v1/movies/550, /v1/proxy → 401; then an
