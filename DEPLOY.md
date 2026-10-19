@@ -222,12 +222,14 @@ answers 502 for the music ids.
 That is the only way to tell "cookies are working" from "the cookie died and a
 lane quietly covered for me", and a 502 names the same path plus the first 200
 characters of googlevideo's own explanation (`error.details.via` carries it too).
-A 403/410 from the media host triggers one forced re-resolve before the 502 —
-measured once, right after the first deploy that carried the cookie jar, every
-id resolved and then answered 403 for a few minutes while YouTube digested a
-session that had never been seen from this address; the same URLs streamed
-normally minutes later. If that window ever reappears, the `via` line says
-whether the URL was minted direct or on a lane.
+A 403/410 from the media host triggers one forced re-resolve **on the lanes**
+before the 502. That is not a rare path: measured over a dozen fresh ids on
+2026-10-19, a URL minted signed-in from this host was refused with an empty-body
+403 almost every time, while the anonymous lane URL for the same id streamed
+immediately — 2.8 s to resolve and 0.25 s to first byte. So the honest reading of
+the `via` line is that `lane` is currently the common answer and `cookies-direct`
+is the exception; the jar still earns its place because it costs nothing when it
+works and clears the breaker the moment one direct fetch succeeds.
 
 **A cold resolve is one race, not a sweep.** `src/youtube/ytdlp.ts` iterates
 the *client* candidates outermost and races every lane in parallel for the
@@ -237,8 +239,9 @@ candidate `default` (the only one that yields an m4a track; the others answer
 "Requested format is not available" after ~2 s each). Before that, the loop was
 lane-major × five audio candidates, so a cold id cost up to 20 yt-dlp runs:
 measured production TTFB for `?audio=1` was 1.4 s cached, 14.5 s and 35.7 s
-cold. Gate 4 now fails a first byte slower than 20 s, so that regression cannot
-come back green.
+cold. Gate 4 fails a first byte slower than 15 s (plus a warmup request first,
+because a fresh container pays yt-dlp's Python and JS-runtime cold start — 15.4 s
+against 3.6-5.4 s once warm), so that regression cannot come back green.
 
 **Client families are per variant, and that is load-bearing.** Forcing one
 `player_client` list for both variants is exactly how music videos ended up
@@ -439,7 +442,7 @@ App secrets, in Doppler **project `platform`, config `prd`**:
 | `CINEPRO_TMDB_API_KEY` | TMDB v3 key the resolver needs; empty key = a Core that resolves nothing |
 | `CINEPRO_CORE_URL` | `https://cinepro-core.shrijit.tech` — for clients (the TV launcher) |
 | `CINEPRO_CORE_BASIC_AUTH` | `cinepro:<password>` — the Traefik basic-auth credential |
-| `CINEPRO_YTDLP_COOKIES_B64` | the dedicated account's signed-in YouTube cookies: a Netscape `cookies.txt`, base64-encoded onto one line, substituted into the app env as `YTDLP_COOKIES_B64`. This is the primary lever — with it the host's own egress resolves ids the WARP lanes lose (measured: `RgKAFK5djSk` 61.5 s/502 through the lanes, ~2.4 s direct signed-in). Base64 because a multi-line value gets truncated by `.env`/Dokploy env handling (it did: 907 bytes of a 2831-byte jar). Rotation: put fresh cookies in Doppler and redeploy — the env is read at boot, so the container must be recreated; a cookie jar that has gone stale degrades to the lane rotation rather than failing outright |
+| `CINEPRO_YTDLP_COOKIES_B64` | the dedicated account's signed-in YouTube cookies: a Netscape `cookies.txt`, base64-encoded onto one line, substituted into the app env as `YTDLP_COOKIES_B64`. The first attempt on every cold id — measured 2-3 s to resolve, and ~4 s end to end when googlevideo accepts the minted URL — with the anonymous WARP lanes as the fallback. Base64 because a multi-line value gets truncated by `.env`/Dokploy env handling (it did: 907 bytes of a 2831-byte jar). Rotation: put fresh cookies in Doppler and redeploy — the env is read at boot, so the container must be recreated; a cookie jar that has gone stale degrades to the lane rotation rather than failing outright |
 | `CINEPRO_LANE_TOKEN` | bearer token for the `cinepro-lane-egress` sidecar's control plane (`:9100`, `status`/`rotate`/`run_cmd`). A control-plane token inside this stack, not a credential for anything outside it — but `run_cmd` is root execution in that container, so it is delivered like a secret rather than committed |
 
 How they reach the container: the deploy job reads Doppler with the read-only
