@@ -37,15 +37,31 @@ const YTDLP_BIN = process.env.YTDLP_PATH ?? 'yt-dlp';
  * clients YouTube bot-checks hardest, and forcing them is what made
  * /v1/youtube/* answer 502 for every music video.
  */
-const VIDEO_CLIENTS = process.env.YTDLP_VIDEO_CLIENTS ?? 'android';
-const AUDIO_CLIENTS = process.env.YTDLP_AUDIO_CLIENTS ?? 'default';
+const VIDEO_CLIENTS =
+    process.env.YTDLP_VIDEO_CLIENTS ?? 'android;web_embedded;mweb;android_vr';
+const AUDIO_CLIENTS =
+    process.env.YTDLP_AUDIO_CLIENTS ??
+    'default;web_embedded;mweb;android;ios+web';
 /**
- * Tried in order when the preferred set yields no usable format: a resolve that
- * fails on one family today may pass on another, and the endpoint must not
- * answer 502 because a single client family went dark.
+ * Candidate client sets, tried in order until one yields a usable format. `;`
+ * separates candidates so a candidate may still contain yt-dlp's own `,` list
+ * (`ios+web` is spelled with `+` because a comma there would split it wrong).
+ * The list is env-overridable on purpose: when YouTube moves the goalposts the
+ * fix is a new candidate order, and that must not need a rebuild to find out.
+ *
+ * Every candidate is tried (they are cheap, ~2-4 s each) because the failing
+ * axis differs per video: an unattested `android` request is fine from a
+ * residential IP and bot-checked from a datacenter one, and only a PoToken
+ * capable client (`web_embedded`, `mweb`) clears the latter.
  */
-const VIDEO_CLIENT_FALLBACKS = [VIDEO_CLIENTS, 'android', 'android_vr'];
-const AUDIO_CLIENT_FALLBACKS = [AUDIO_CLIENTS, 'android', 'ios,web'];
+function clientCandidates(raw: string): string[] {
+    return raw
+        .split(';')
+        .map((entry) => entry.trim().replace(/\+/g, ','))
+        .filter((entry) => entry.length > 0);
+}
+const VIDEO_CLIENT_FALLBACKS = clientCandidates(VIDEO_CLIENTS);
+const AUDIO_CLIENT_FALLBACKS = clientCandidates(AUDIO_CLIENTS);
 /**
  * The `bgutil` PoToken provider (a second compose service, see
  * deploy/compose.prod.yml). From a datacenter IP YouTube answers the player
