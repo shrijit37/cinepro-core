@@ -52,10 +52,16 @@ COPY --from=builder /app/dist ./dist
 # a version this repo's CI gate has actually streamed from — bump it in the same
 # commit that re-runs the gate, never with a floating tag. Pure Python: no
 # arch-specific download, works for the amd64 and arm64 builds alike.
+#
+# bgutil-ytdlp-pot-provider is the yt-dlp side of the PoToken provider service
+# in deploy/compose.prod.yml: without a PoToken YouTube answers this host with
+# "Sign in to confirm you're not a bot" and hands out throttled media URLs.
 ARG YTDLP_VERSION=2026.08.19
+ARG BGUTIL_VERSION=2.0.2
 RUN apk add --no-cache python3 py3-pip && \
     pip install --break-system-packages --no-cache-dir --root-user-action=ignore \
-        "yt-dlp==${YTDLP_VERSION}" && \
+        "yt-dlp==${YTDLP_VERSION}" \
+        "bgutil-ytdlp-pot-provider==${BGUTIL_VERSION}" && \
     rm -rf /root/.cache/pip
 
 RUN addgroup -g 1001 -S nodejs && \

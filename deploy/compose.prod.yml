@@ -14,6 +14,19 @@ services:
     networks:
       - dokploy-network
 
+  # Mints the YouTube PoTokens that yt-dlp needs for /v1/youtube/*: from this
+  # host YouTube answers the player request with "Sign in to confirm you're not
+  # a bot" and hands out throttled media URLs. Upstream's server image is
+  # pinned by tag; Core reaches it as http://bgutil-provider:4416 (YTDLP_POT_URL
+  # overrides, empty disables). No published port — same network only.
+  bgutil-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:2.0.2
+    restart: unless-stopped
+    networks:
+      dokploy-network:
+        aliases:
+          - bgutil-provider
+
 networks:
   dokploy-network:
     external: true

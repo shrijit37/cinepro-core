@@ -34,6 +34,15 @@ const CLIENT_FALLBACKS = [
     'ios,visionos',
     'tv_embedded,web_safari'
 ];
+/**
+ * The `bgutil` PoToken provider (a second compose service, see
+ * deploy/compose.prod.yml). From a datacenter IP YouTube answers the player
+ * request with "Sign in to confirm you're not a bot" and hands out throttled
+ * URLs; a PoToken minted by that service is what lifts both. Empty value
+ * disables it (local runs without the provider).
+ */
+const POT_PROVIDER_URL =
+    process.env.YTDLP_POT_URL ?? 'http://bgutil-provider:4416';
 const VIDEO_FORMAT = 'b[ext=mp4][height<=720]/b[height<=720]/b';
 const AUDIO_FORMAT = 'bestaudio[ext=m4a]/bestaudio';
 
@@ -174,6 +183,12 @@ async function attemptResolve(
         '--no-cache-dir',
         '--extractor-args',
         `youtube:player_client=${clients}`,
+        ...(POT_PROVIDER_URL
+            ? [
+                  '--extractor-args',
+                  `youtubepot-bgutilhttp:base_url=${POT_PROVIDER_URL}`
+              ]
+            : []),
         '-f',
         audio ? AUDIO_FORMAT : VIDEO_FORMAT,
         '-J',
