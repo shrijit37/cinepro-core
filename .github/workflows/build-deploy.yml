@@ -286,3 +286,53 @@ jobs:
           [ "$code" = "200" ] || { echo "::error::first segment returned HTTP $code"; exit 1; }
           [ "$size" -gt 100000 ] || { echo "::error::first segment is only $size bytes — not media"; exit 1; }
           [ "$first" = "47" ] || { echo "::error::first segment does not start with the MPEG-TS sync byte (0x47) — the playlist is not media"; exit 1; }
+
+      - name: Gate 4 — YouTube media streams with ranges
+        run: |
+          set -euo pipefail
+          # The TV cannot fetch googlevideo: unattested URLs are throttled to
+          # bounded sub-megabyte ranges (403 past that, 403 on an open-ended
+          # range). So Core must mint the URL with yt-dlp AND stream the bytes
+          # itself, honouring Range. This gate is the only thing standing
+          # between a yt-dlp regression and a silent "no playback".
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$APP_URL/v1/youtube/dQw4w9WgXcQ")
+          echo "anonymous /v1/youtube/dQw4w9WgXcQ -> $code"
+          [ "$code" = "401" ] || { echo "::error::anonymous YouTube endpoint returned $code, expected 401"; exit 1; }
+
+          check_video() {
+            local id=$1 code size total half end brand
+            code=$(curl -s -D yt_headers.txt -o yt_first.bin -w '%{http_code}' --max-time 180 \
+              -u "$BASIC_AUTH" -H 'Range: bytes=0-1048575' "$APP_URL/v1/youtube/$id")
+            size=$(wc -c < yt_first.bin)
+            total=$(grep -i '^content-range:' yt_headers.txt | tr -d '\r' | sed -E 's#.*/##')
+            echo "  $id  range 0-1048575 -> HTTP $code, $size bytes, total ${total:-?}"
+            [ "$code" = "206" ] || { echo "::error::$id: expected 206, got $code"; return 1; }
+            [ "$size" = "1048576" ] || { echo "::error::$id: expected 1048576 bytes, got $size"; return 1; }
+            case "$total" in ''|*[!0-9]*) echo "::error::$id: no usable Content-Range total"; return 1 ;; esac
+
+            half=$(( total / 2 ))
+            end=$(( half + 1023 ))
+            code=$(curl -s -o yt_mid.bin -w '%{http_code}' --max-time 180 \
+              -u "$BASIC_AUTH" -H "Range: bytes=$half-$end" "$APP_URL/v1/youtube/$id")
+            size=$(wc -c < yt_mid.bin)
+            echo "  $id  range $half-$end -> HTTP $code, $size bytes"
+            [ "$code" = "206" ] || { echo "::error::$id: mid-file range returned $code"; return 1; }
+            [ "$size" = "1024" ] || { echo "::error::$id: mid-file range returned $size bytes, expected 1024"; return 1; }
+
+            code=$(curl -s -o yt_audio.bin -w '%{http_code}' --max-time 180 \
+              -u "$BASIC_AUTH" -H 'Range: bytes=0-1023' "$APP_URL/v1/youtube/$id?audio=1")
+            size=$(wc -c < yt_audio.bin)
+            brand=$(dd if=yt_audio.bin bs=1 skip=4 count=4 2>/dev/null || true)
+            echo "  $id  audio -> HTTP $code, $size bytes, brand '$brand'"
+            [ "$code" = "206" ] || { echo "::error::$id audio: expected 206, got $code"; return 1; }
+            [ "$size" = "1024" ] || { echo "::error::$id audio: expected 1024 bytes, got $size"; return 1; }
+            [ "$brand" = "ftyp" ] || { echo "::error::$id audio: no ftyp box at byte 4 (got '$brand') — not MP4"; return 1; }
+            return 0
+          }
+
+          fail=0
+          for id in dQw4w9WgXcQ kJQP7kiw5Fk; do
+            echo "video $id"
+            check_video "$id" || fail=1
+          done
+          [ "$fail" = "0" ] || exit 1

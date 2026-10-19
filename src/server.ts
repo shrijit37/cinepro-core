@@ -3,8 +3,10 @@ import 'dotenv/config';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { installFetchRetry } from './fetchRetry.js';
+import { registerYouTubeRoutes } from './youtube/routes.js';
 import { knownThirdPartyProxies } from './thirdPartyProxies.js';
 import { streamPatterns } from './streamPatterns.js';
+import type { FastifyInstance } from 'fastify';
 
 // Must be installed before the server issues its first upstream request.
 installFetchRetry();
@@ -85,6 +87,12 @@ async function main() {
     // Register providers
     const registry = server.getRegistry();
     await registry.discoverProviders(path.join(__dirname, './providers/'));
+
+    // YouTube media endpoints. `app` is private on OMSSServer — there is no
+    // hook to attach routes, so reach into it rather than re-implementing the
+    // server; the framework field is stable and this is the only coupling.
+    const { app } = server as unknown as { app: FastifyInstance };
+    registerYouTubeRoutes(app);
 
     await server.start();
 

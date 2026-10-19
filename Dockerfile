@@ -47,6 +47,17 @@ RUN npm ci --only=production
 
 COPY --from=builder /app/dist ./dist
 
+# yt-dlp resolves the YouTube media URLs for /v1/youtube/*. It is the moving
+# part of that endpoint (YouTube breaks extractors monthly), so it is pinned to
+# a version this repo's CI gate has actually streamed from — bump it in the same
+# commit that re-runs the gate, never with a floating tag. Pure Python: no
+# arch-specific download, works for the amd64 and arm64 builds alike.
+ARG YTDLP_VERSION=2026.08.19
+RUN apk add --no-cache python3 py3-pip && \
+    pip install --break-system-packages --no-cache-dir --root-user-action=ignore \
+        "yt-dlp==${YTDLP_VERSION}" && \
+    rm -rf /root/.cache/pip
+
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 

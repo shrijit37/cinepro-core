@@ -102,6 +102,51 @@ poll.
   idempotent `GET`/`HEAD` fetch failures once after 250 ms; anything else
   propagates unchanged.
 
+## YouTube media (`/v1/youtube/*`)
+
+```
+GET /v1/youtube/{videoId}            # muxed MP4, best ≤720p (usually 360p/720p)
+GET /v1/youtube/{videoId}?audio=1    # audio only, m4a/AAC preferred
+```
+
+Both stream the bytes from Core and honour `Range` (`Accept-Ranges: bytes`,
+real `Content-Range`, `206` for a satisfiable range, `416` past the end) and
+never redirect — a redirect would hand the throttled googlevideo URL straight
+back to the TV. Same Basic credential as everything else; anonymous is 401.
+Failures are JSON (`{"error":{"code","message","details"},"traceId"}`) with a
+matching status: `400 INVALID_VIDEO_ID`, `502 YTDLP_*` / `UPSTREAM_*`.
+
+**Why the server does this at all.** Unattested clients get throttled URLs:
+bounded ranges under ~1 MiB answer `206`, anything past that `403`, and an
+open-ended `Range: bytes=0-` always `403`. The PoToken that lifts that gate
+cannot be minted in the launcher's Kotlin, so it has to be yt-dlp on the
+server. That is also the endpoint's fragility: YouTube breaks the extractor
+monthly, so `yt-dlp` is **pinned** in the Dockerfile
+(`ARG YTDLP_VERSION=2026.08.19`) and gate 4 streams real bytes before a deploy
+is called green. Bump the pin only in a commit that re-runs that gate.
+
+Implementation notes for whoever touches this next:
+
+- `src/youtube/ytdlp.ts` resolves with `--extractor-args
+  youtube:player_client=android,visionos` and format
+  `b[ext=mp4][height<=720]/b[height<=720]/b` — the `android` client is the only
+  family that still advertises **muxed** progressive MP4, which is what a plain
+  HTTP player can play; the default client set yields split video-only /
+  audio-only tracks that would need an ffmpeg remux and would break seeking.
+  Client sets are tried in order (`CLIENT_FALLBACKS`) so one blocked family is
+  not a 502, and `YTDLP_PLAYER_CLIENT` overrides the first entry without a code
+  change.
+- Resolutions are cached for `YOUTUBE_CACHE_TTL` seconds (default 3600) and
+  in-flight resolves are shared. A `403`/`410` from the media host re-resolves
+  once and retries with the same `Range`; if the body has already started
+  flowing and the upstream dies, the connection is destroyed rather than
+  closed as a complete 200.
+- `HEAD` is answered from the raw socket: Fastify rewrites `Content-Length` to
+  `0` for a handler that sends no payload, which would tell the player the
+  media is empty.
+- The routes are attached in `src/server.ts` through `server.app` — private on
+  `OMSSServer`, with no registration hook, so that cast is deliberate.
+
 ## Secrets
 
 App secrets, in Doppler **project `platform`, config `prd`**:
@@ -142,6 +187,11 @@ then fails every cache read. `PUBLIC_URL` matters because the resolver rewrites
 proxy URLs against it — it must match the public hostname and carry no trailing
 slash.
 
+The `/v1/youtube/*` endpoint reads four optional overrides; the defaults are the
+tested ones and nothing sets them in `deploy/app.env`:
+`YTDLP_PATH` (`yt-dlp`), `YTDLP_PLAYER_CLIENT` (first client set tried),
+`YOUTUBE_CACHE_TTL` seconds (3600), `YOUTUBE_RESOLVE_TIMEOUT_MS` (30000).
+
 ## Repo configuration
 
 | name | kind | value |
@@ -172,6 +222,9 @@ the image `release.yml` used to, and the Codeberg mirror needs a
 | gate 3: first segment `403`, body `Attention Required \| Cloudflare` | the media fetch is carrying a `Referer`/`Origin`: the CDN's hotlink rule rejects both. The provider must embed media headers without them (see "Two upstream behaviours") |
 | gate 3: first segment returns HTML (first byte not `0x47`) or is tiny | the playlist advertises pages instead of media — provider rot. Gate 3 exists so this never ships as "working" again |
 | gate 3: master 200 with no variants, or media playlist with no segments | the provider returned a stub playlist; check the resolve diagnostics for the provider's own error |
+| gate 4: `502 YTDLP_FAILED` / `YTDLP_NO_FORMAT` | yt-dlp's YouTube extractor is broken or every client family is blocked for this video/IP. Bump the `YTDLP_VERSION` pin in the Dockerfile to a release that works, then re-run the deploy |
+| gate 4: range request answered 200 with the whole file, or 403 | the endpoint is not honouring `Range` — check it is not redirecting to googlevideo, and that the upstream fetch forwards the client's `Range` header |
+| gate 4: audio variant has no `ftyp` at byte 4 | `bestaudio[ext=m4a]` fell through to WebM/Opus; the TV plays that badly — check the extractor still offers the m4a track |
 | `Unresolved vault reference` in Dokploy's deploy log | an env value was replaced with a `{{vault.*}}` ref by hand; this stack resolves no vault refs |
 | deploy green but the domain serves the old build | `compose.deploy` must be called, not `application.redeploy`; and the gate must require this run's SHA (a one-shot liveness check passes against the previous container) |
 | container running but the domain 404s | the domain's `serviceName` must equal the compose service key (`cinepro-core`) and its port must equal the app's `PORT` (3210) |
@@ -195,6 +248,18 @@ VAR=$(curl -s -u "$AUTH" "$MASTER" | grep -v '^#' | head -1)
 SEG=$(curl -s -u "$AUTH" "$BASE$VAR" | grep -v '^#' | head -1)
 curl -s -u "$AUTH" "$BASE$SEG" -o /tmp/seg.bin          # want 200 + ~750 KB
 head -c 1 /tmp/seg.bin | od -An -tx1                    # want 47 (MPEG-TS sync)
+```
+
+segments the player walks: a range request has to come back `206` with real
+bytes, and the audio variant has to be an MP4 container.
+
+```
+BASE=https://cinepro-core.shrijit.tech; AUTH=…
+curl -s -D - -o /dev/null -u "$AUTH" -H 'Range: bytes=0-1048575' \
+  "$BASE/v1/youtube/dQw4w9WgXcQ"        # 206, content-range: bytes 0-1048575/<total>
+curl -s -o /tmp/au.bin -u "$AUTH" -H 'Range: bytes=0-1023' \
+  "$BASE/v1/youtube/dQw4w9WgXcQ?audio=1"                     # 206
+dd if=/tmp/au.bin bs=1 skip=4 count=4 2>/dev/null; echo     # ftyp
 ```
 
 ## What goes in git and what never does
