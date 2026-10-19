@@ -84,6 +84,12 @@ For that we've prepared [deployment guides](https://docs.cinepro.cc/quickstart).
 
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cinepro-org/core) [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/cinepro-org/core) [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/cinepro-org/core)
 
+**This fork deploys differently.** `shrijit37/cinepro-core` runs as a Dokploy
+compose app that pulls a CI-built image from GHCR, behind Traefik basic auth.
+`main` is the deploy branch and every push to it rebuilds and rolls the service.
+The buttons above, `vercel.json` and `wrangler.json` are upstream's and are not
+used here. See **[DEPLOY.md](DEPLOY.md)**.
+
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ## Contributing

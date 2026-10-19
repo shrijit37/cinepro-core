@@ -109,6 +109,27 @@ jobs:
           rm -f /tmp/doppler.json
           echo "loaded ${{ github.repository }} app secrets from Doppler platform/prd"
 
+      - name: Re-assert the domain and its auth middleware
+        env:
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+          DOMAIN_ID: ${{ vars.DOKPLOY_DOMAIN_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DOMAIN_ID:-}" ]; then
+            echo "::error::repo variable DOKPLOY_DOMAIN_ID is not set"
+            exit 1
+          fi
+          # Auth is the whole point: a hand-edited domain that dropped the
+          # middleware would reopen /v1/proxy to anyone. The name must carry
+          # `@file` — Dokploy injects this list verbatim into the router label
+          # and the middleware is defined in the file provider, so an
+          # unqualified name makes Traefik drop the router and every request
+          # 404s.
+          curl -fsS -X POST "$DOKPLOY_URL/api/domain.update" \
+            -H "x-api-key: $DOKPLOY_API_KEY" -H 'Content-Type: application/json' \
+            -d "$(jq -nc --arg id "$DOMAIN_ID" '{domainId: $id, host: "cinepro-core.shrijit.tech", port: 3210, https: true, certificateType: "letsencrypt", serviceName: "cinepro-core", middlewares: ["cinepro-core-auth@file"]}')" >/dev/null
+          echo "domain re-asserted: cinepro-core.shrijit.tech -> cinepro-core:3210 with cinepro-core-auth@file"
+
       - name: Pin the compose app to this build
         env:
           DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
