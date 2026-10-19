@@ -160,6 +160,14 @@ back to the TV. Same Basic credential as everything else; anonymous is 401.
 Failures are JSON (`{"error":{"code","message","details"},"traceId"}`) with a
 matching status: `400 INVALID_VIDEO_ID`, `502 YTDLP_*` / `UPSTREAM_*`.
 
+A request with **no** `Range` is still sent upstream as `Range: bytes=0-`, and
+the resulting `206` is answered as a `200` with the true `Content-Length`. An
+unranged GET of a music track is throttled: googlevideo served 2.9 MB of a
+3.4 MB track in 93 s (~250 kbit/s) and closed it short of the advertised
+length, while `bytes=0-` delivered the whole file in ~3 s. Everything is piped
+straight through — no buffering of the media body anywhere — because media3
+seeks constantly and needs the bytes paced as they arrive.
+
 **Why the server does this at all.** Unattested clients get throttled URLs:
 bounded ranges under ~1 MiB answer `206`, anything past that `403`, and an
 open-ended `Range: bytes=0-` always `403`. The PoToken that lifts that gate

@@ -208,6 +208,25 @@ function totalFrom(response: Response, media: ResolvedMedia): number | null {
     return media.size;
 }
 
+/** `Content-Range: bytes <start>-<end>/<total>` parsed, null when absent. */
+function contentRangeOf(
+    response: Response
+): { start: number; end: number; total: number } | null {
+    const header = response.headers.get('content-range');
+    if (!header) {
+        return null;
+    }
+    const match = /^bytes (\d+)-(\d+)\/(\d+)$/i.exec(header.trim());
+    if (!match) {
+        return null;
+    }
+    return {
+        start: Number(match[1]),
+        end: Number(match[2]),
+        total: Number(match[3])
+    };
+}
+
 function buildHeaders(
     media: ResolvedMedia,
     status: number,
@@ -282,7 +301,12 @@ async function handleYouTube(
             videoId,
             audio,
             media,
-            rangeHeader,
+            // An unranged GET is throttled: googlevideo serves a music track at
+            // ~250 kbit/s and closes it short of the length it advertised
+            // (measured by this repo's gate: 2.9 MB of 3.4 MB after 93 s),
+            // while `Range: bytes=0-` delivers the same file in ~3 s. Ask for
+            // the open-ended range either way and answer 200 below.
+            rangeHeader ?? 'bytes=0-',
             controller.signal
         );
     } catch (error) {
@@ -358,6 +382,23 @@ async function handleYouTube(
         // player believe it received a complete response.
         reply.raw.destroy();
     });
+
+    if (!range && response.status === 206) {
+        // The client asked for the whole file and the 206 is our own doing:
+        // forward the body as a plain 200 with the true length.
+        const span = contentRangeOf(response);
+        if (span && span.start === 0 && span.end === span.total - 1) {
+            return reply
+                .code(200)
+                .headers({
+                    'accept-ranges': 'bytes',
+                    'content-type': resolved.contentType,
+                    'cache-control': 'no-store',
+                    'content-length': String(span.total)
+                })
+                .send(source);
+        }
+    }
 
     if (response.status === 200 && range && total) {
         // Upstream ignored the range: slice locally so the player still gets a
