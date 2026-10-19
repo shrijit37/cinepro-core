@@ -21,19 +21,23 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 
 const YTDLP_BIN = process.env.YTDLP_PATH ?? 'yt-dlp';
-const PLAYER_CLIENTS = process.env.YTDLP_PLAYER_CLIENT ?? 'android,visionos';
 /**
- * Tried in order when the preferred set yields no usable format. YouTube
- * blocks client families by IP and by video; a resolve that fails on
- * `android` today may pass on `ios`, and the endpoint must not answer 502
- * because one client family went dark.
+ * Client families, best first. `android` is the only one that still advertises
+ * **muxed** progressive MP4 (format 18/22), which is what a plain HTTP player
+ * can play; `ios`/`android_vr`/`mweb` are the families that pass YouTube's
+ * player request without cookies from a datacenter IP. `tv_embedded` and
+ * `web_safari` are deliberately *not* here — they are the two clients YouTube
+ * bot-checks hardest ("Sign in to confirm you're not a bot", which is what made
+ * /v1/youtube/* answer 502 for every music video).
  */
-const CLIENT_FALLBACKS = [
-    PLAYER_CLIENTS,
-    'android',
-    'ios,visionos',
-    'tv_embedded,web_safari'
-];
+const PLAYER_CLIENTS =
+    process.env.YTDLP_PLAYER_CLIENT ?? 'android,ios,android_vr,mweb';
+/**
+ * Tried in order when the preferred set yields no usable format: a resolve that
+ * fails on one family today may pass on another, and the endpoint must not
+ * answer 502 because a single client family went dark.
+ */
+const CLIENT_FALLBACKS = [PLAYER_CLIENTS, 'android', 'ios,mweb', 'default'];
 /**
  * The `bgutil` PoToken provider (a second compose service, see
  * deploy/compose.prod.yml). From a datacenter IP YouTube answers the player

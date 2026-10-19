@@ -331,7 +331,11 @@ jobs:
           }
 
           fail=0
-          for id in dQw4w9WgXcQ kJQP7kiw5Fk; do
+          # dQw4w9WgXcQ is an ordinary video; the rest are the music tracks the
+          # owner actually plays. A client family YouTube decides to bot-check
+          # turns these into 502s, which is a shipped-as-green regression until
+          # this gate says otherwise.
+          for id in dQw4w9WgXcQ kJQP7kiw5Fk zAiIgYOH4Ys BmRX2g6-iQI; do
             echo "video $id"
             check_video "$id" || fail=1
           done

@@ -1,0 +1,12 @@
+HTTP/1.1 206 Partial Content
+access-control-allow-origin: *
+access-control-expose-headers: Content-Range, Accept-Ranges, ETag
+accept-ranges: bytes
+content-type: video/mp4
+cache-control: no-store
+content-length: 1048576
+content-range: bytes 0-1048575/4027034
+Date: Mon, 19 Oct 2026 14:41:43 GMT
+Connection: keep-alive
+Keep-Alive: timeout=72
+
