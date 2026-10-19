@@ -58,9 +58,12 @@ services:
       # sidecar is reachable on dokploy-network only.
       LANE_TOKEN: ${LANE_TOKEN:?LANE_TOKEN must be set in the compose env}
       LANE_MODE: warp
-      # Two lanes, four WARP accounts: boot brings up max(pool, lanes*2).
-      LANES: "8001,8002"
-      WARP_POOL_SIZE: "4"
+      # Four lanes, eight WARP accounts: boot brings up max(pool, lanes*2).
+      # Measured with two lanes: the bot check is per WARP address, not per
+      # client — one music id resolved through 8002 after 8001 refused it, so
+      # more accounts is the lever that costs nothing but memory.
+      LANES: "8001,8002,8003,8004"
+      WARP_POOL_SIZE: "8"
       PROBE_SURFACES: "chat"
       ZEN_PROBE_TIMEOUT: "12"
     restart: unless-stopped

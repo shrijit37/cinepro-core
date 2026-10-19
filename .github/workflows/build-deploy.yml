@@ -337,55 +337,59 @@ jobs:
 
           body() { printf '%s' "$(head -c 400 "$1" 2>/dev/null || true)" | tr -d '\r'; }
 
-          check_video() {
-            local id=$1 code size total half end brand
+          # $1 = id, $2 = query suffix ('' or '?audio=1'), $3 = expected box at
+          # byte 4 ('' = do not assert). Exercises the three shapes the player
+          # uses: a megabyte at the start, a 1 KiB head range, and a mid-file
+          # range derived from the total the server reports.
+          check_stream() {
+            local id=$1 suffix=$2 want_brand=$3 code size total half end brand
+            local url="$APP_URL/v1/youtube/$id$suffix"
             code=$(curl -s -D yt_headers.txt -o yt_first.bin -w '%{http_code}' --max-time 180 \
-              -u "$BASIC_AUTH" -H 'Range: bytes=0-1048575' "$APP_URL/v1/youtube/$id")
+              -u "$BASIC_AUTH" -H 'Range: bytes=0-1048575' "$url")
             size=$(wc -c < yt_first.bin)
             total=$(grep -i '^content-range:' yt_headers.txt | tr -d '\r' | sed -E 's#.*/##')
-            echo "  $id  range 0-1048575 -> HTTP $code, $size bytes, total ${total:-?}"
-            [ "$code" = "206" ] || { echo "::error::$id: expected 206, got $code: $(body yt_first.bin)"; return 1; }
-            [ "$size" = "1048576" ] || { echo "::error::$id: expected 1048576 bytes, got $size"; return 1; }
-            case "$total" in ''|*[!0-9]*) echo "::error::$id: no usable Content-Range total"; return 1 ;; esac
+            echo "  $id$suffix  range 0-1048575 -> HTTP $code, $size bytes, total ${total:-?}"
+            [ "$code" = "206" ] || { echo "::error::$id$suffix: expected 206, got $code: $(body yt_first.bin)"; return 1; }
+            [ "$size" = "1048576" ] || { echo "::error::$id$suffix: expected 1048576 bytes, got $size"; return 1; }
+            case "$total" in ''|*[!0-9]*) echo "::error::$id$suffix: no usable Content-Range total"; return 1 ;; esac
 
             code=$(curl -s -o yt_small.bin -w '%{http_code}' --max-time 180 \
-              -u "$BASIC_AUTH" -H 'Range: bytes=0-1023' "$APP_URL/v1/youtube/$id")
+              -u "$BASIC_AUTH" -H 'Range: bytes=0-1023' "$url")
             size=$(wc -c < yt_small.bin)
-            echo "  $id  range 0-1023 -> HTTP $code, $size bytes"
-            [ "$code" = "206" ] || { echo "::error::$id: head range expected 206, got $code: $(body yt_small.bin)"; return 1; }
-            [ "$size" = "1024" ] || { echo "::error::$id: head range returned $size bytes, expected 1024"; return 1; }
+            brand=$(dd if=yt_small.bin bs=1 skip=4 count=4 2>/dev/null || true)
+            echo "  $id$suffix  range 0-1023 -> HTTP $code, $size bytes, brand '$brand'"
+            [ "$code" = "206" ] || { echo "::error::$id$suffix: head range expected 206, got $code: $(body yt_small.bin)"; return 1; }
+            [ "$size" = "1024" ] || { echo "::error::$id$suffix: head range returned $size bytes, expected 1024"; return 1; }
+            # An audio response whose byte 4 is not `ftyp` is not an MP4/AAC
+            # track and the TV plays it badly.
+            if [ -n "$want_brand" ] && [ "$brand" != "$want_brand" ]; then
+              echo "::error::$id$suffix: no $want_brand box at byte 4 (got '$brand') — not MP4"
+              return 1
+            fi
 
             half=$(( total / 2 ))
             end=$(( half + 1023 ))
             code=$(curl -s -o yt_mid.bin -w '%{http_code}' --max-time 180 \
-              -u "$BASIC_AUTH" -H "Range: bytes=$half-$end" "$APP_URL/v1/youtube/$id")
+              -u "$BASIC_AUTH" -H "Range: bytes=$half-$end" "$url")
             size=$(wc -c < yt_mid.bin)
-            echo "  $id  range $half-$end -> HTTP $code, $size bytes"
-            [ "$code" = "206" ] || { echo "::error::$id: mid-file range returned $code: $(body yt_mid.bin)"; return 1; }
-            [ "$size" = "1024" ] || { echo "::error::$id: mid-file range returned $size bytes, expected 1024"; return 1; }
-
-            # The audio variant is the one that breaks: `bestaudio[ext=m4a]` is
-            # only offered by some client families, and a flagged egress loses
-            # them all. A 206 whose byte 4 is not `ftyp` is not an MP4/AAC
-            # track and the TV plays it badly, so the brand is asserted too.
-            code=$(curl -s -o yt_audio.bin -w '%{http_code}' --max-time 180 \
-              -u "$BASIC_AUTH" -H 'Range: bytes=0-1023' "$APP_URL/v1/youtube/$id?audio=1")
-            size=$(wc -c < yt_audio.bin)
-            brand=$(dd if=yt_audio.bin bs=1 skip=4 count=4 2>/dev/null || true)
-            echo "  $id  audio -> HTTP $code, $size bytes, brand '$brand'"
-            [ "$code" = "206" ] || { echo "::error::$id audio: expected 206, got $code: $(body yt_audio.bin)"; return 1; }
-            [ "$size" = "1024" ] || { echo "::error::$id audio: expected 1024 bytes, got $size"; return 1; }
-            [ "$brand" = "ftyp" ] || { echo "::error::$id audio: no ftyp box at byte 4 (got '$brand') — not MP4"; return 1; }
+            echo "  $id$suffix  range $half-$end -> HTTP $code, $size bytes"
+            [ "$code" = "206" ] || { echo "::error::$id$suffix: mid-file range returned $code: $(body yt_mid.bin)"; return 1; }
+            [ "$size" = "1024" ] || { echo "::error::$id$suffix: mid-file range returned $size bytes, expected 1024"; return 1; }
             return 0
           }
 
           fail=0
-          # dQw4w9WgXcQ is an ordinary video; the rest are the music tracks the
-          # owner actually plays. A client family YouTube decides to bot-check
-          # turns these into 502s, which is a shipped-as-green regression until
-          # this gate says otherwise.
+          # dQw4w9WgXcQ is an ordinary video, so it also proves the video
+          # variant. The music ids are what the TV's music screen plays, and it
+          # plays them as audio (`?audio=1`): their video variant is not a
+          # product path and YouTube bot-checks it independently, so it is not
+          # gated here. A client family YouTube decides to bot-check turns these
+          # into 502s, which is a shipped-as-green regression until this gate
+          # says otherwise.
+          echo "video dQw4w9WgXcQ"
+          check_stream dQw4w9WgXcQ '' '' || fail=1
           for id in dQw4w9WgXcQ kJQP7kiw5Fk zAiIgYOH4Ys BmRX2g6-iQI; do
-            echo "video $id"
-            check_video "$id" || fail=1
+            echo "audio $id"
+            check_stream "$id" '?audio=1' ftyp || fail=1
           done
           [ "$fail" = "0" ] || exit 1

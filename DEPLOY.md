@@ -20,9 +20,10 @@ git push main
             authenticated /v1/movies/550 → ≥1 source
   → gate 3: that source's HLS chain serves a real MPEG-TS segment (0x47)
   → gate 4: the lane-egress control plane is reachable from inside Core, and
-            for dQw4w9WgXcQ + the three music ids: video 206 at 0-1048575,
-            0-1023 and a mid-file range, and ?audio=1 → 206 with `ftyp` at
-            byte 4. This is the gate that says "the egress works"
+            ?audio=1 for all four ids (including dQw4w9WgXcQ) answers 206 at
+            0-1048575, 0-1023 and a mid-file range with `ftyp` at byte 4,
+            while dQw4w9WgXcQ's video variant streams the same ranges. This is
+            the gate that says "the egress works"
 ```
 
 Nothing is built on the server. This repo is a mirror of `cinepro-org/core`
@@ -37,7 +38,8 @@ hook added; `src/` is otherwise upstream's.
 | Dokploy compose app | `cinepro-core`, `composeId mopcs_qIGlzM4iMd-s-M3`, appName `cinepro-rqornd` |
 | container | `cinepro-rqornd-cinepro-core-1`, image = the pinned `ghcr.io/shrijit37/cinepro-core:<sha>` |
 | second service | `bgutil-provider` — upstream `brainicism/bgutil-ytdlp-pot-provider:2.0.2`, mints the YouTube PoTokens `yt-dlp` needs; no published port, reachable only as `http://bgutil-provider:4416` on `dokploy-network` |
-| third service | `lane-egress` — `ghcr.io/shrijit37/meshcode-lane-egress`, digest-pinned; WARP egress lanes on `:8001`/`:8002` that `YTDLP_PROXY` resolves YouTube through, plus a token-protected control plane on `:9100`. No published ports. See "The egress this stack actually uses" |
+| third service | `lane-egress` — `ghcr.io/shrijit37/meshcode-lane-egress`, digest-pinned; WARP egress lanes on `:8001`–`:8004` that `YTDLP_PROXY` resolves YouTube through
+(and that the media byte fetch leaves through), plus a token-protected control plane on `:9100`. No published ports. See "The egress this stack actually uses" |
 | compose file | owned by the API; `deploy/compose.prod.yml` in this repo is the source of truth, CI substitutes the image token into it |
 | domain | `cinepro-core.shrijit.tech` → service `cinepro-core`, port 3210, Let's Encrypt |
 | auth | Traefik middleware `cinepro-core-auth` (`basicAuth`, bcrypt) in the host's `/etc/dokploy/traefik/dynamic/middlewares.yml`, attached to the domain's routers |
@@ -253,13 +255,21 @@ error keeps the short tail — a launcher reads that one).
 
 ```
 lane-egress   ghcr.io/shrijit37/meshcode-lane-egress@sha256:37c6dbd7…   (digest-pinned)
-  LANE_MODE=warp, LANES=8001,8002, WARP_POOL_SIZE=4, PROBE_SURFACES=chat
-  one HTTP CONNECT proxy per lane on :8001 and :8002, control plane on :9100
+  LANE_MODE=warp, LANES=8001,8002,8003,8004, WARP_POOL_SIZE=8,
+  PROBE_SURFACES=chat
+  one HTTP CONNECT proxy per lane on :8001–:8004, control plane on :9100
   no published ports; reachable only on dokploy-network, as `lane-egress`
 
-cinepro-core  YTDLP_PROXY=http://lane-egress:8001;http://lane-egress:8002
+cinepro-core  YTDLP_PROXY=http://lane-egress:8001;http://lane-egress:8002;http://lane-egress:8003;http://lane-egress:8004
               (the `;` list yt-dlp rotates per client-per-egress)
 ```
+
+Four lanes rather than two because YouTube's bot check is **per egress
+address, not per client family**: measured with two lanes, `zAiIgYOH4Ys`
+`?audio=1` resolved through `:8002` at 19:35Z after `:8001` refused it for every
+client, while `kJQP7kiw5Fk` and `BmRX2g6-iQI` were refused by both. Extra
+accounts are the only lever that costs nothing but memory, so the sidecar runs
+four (pool of eight, `max(pool, lanes*2)` at boot).
 
 Each lane is one Cloudflare WARP WireGuard exit (AS13335, `hosting: false`),
 dialed by xray userspace — no `cap_add`, no `/dev/net/tun`, no `ip_forward`.
@@ -294,9 +304,24 @@ same app env).
 
 Measured behaviour of this axis, for the next person:
 
-- From the Dokploy host, through the WARP lanes, `zAiIgYOH4Ys`, `kJQP7kiw5Fk`
-  and `BmRX2g6-iQI` resolve to `bestaudio[ext=m4a]` URLs that answer `206` with
-  `ftyp` at byte 4 — that is what gate 4 asserts.
+- Egress reputation is the axis, and it is split finer than "WARP or not": on a
+  workstation a `wgcf`+`wireproxy` WARP exit (IPv4 `104.28.192.188`) resolved
+  `zAiIgYOH4Ys`, `kJQP7kiw5Fk` and `BmRX2g6-iQI` with no bot check, but the
+  *Dokploy host's* lanes egress IPv6 (`2a09:bac5:…::243:*`, the sidecar pins
+  `UseIPv6` because v4 is a shared world pool). Through those lanes on
+  2026-10-19: `zAiIgYOH4Ys ?audio=1` resolved via client `default` through
+  `:8002`, while `kJQP7kiw5Fk` and `BmRX2g6-iQI` were bot-checked on all five
+  audio client families on both lanes. Hence four lanes: the check follows the
+  address.
+- The media byte fetch must leave through **the lane that minted the URL**.
+  `ResolvedMedia.proxy` records it and `src/youtube/routes.ts` sends the GET
+  through a `ProxyAgent` for that lane. Measured before that was wired: the
+  `:8002`-resolved `zAiIgYOH4Ys` URL then died `fetch failed` from Core's own
+  egress — googlevideo scopes such URLs to the resolving egress. That proxied
+  path uses undici's own `fetch`, not the global one: the global fetch is
+  Node's bundled undici and, handed a dispatcher from the `undici` package,
+  returns the right status and body with **every response header missing**
+  (206, headers empty), which loses `Content-Range` and `Content-Type`.
 - From the same host through its own egress, all four ids answer `502` with
   `"Sign in to confirm you're not a bot"` on every client family
   (`android`, `android_vr`, `ios`, `web`, `mweb`, `tv`, `web_embedded`,
@@ -306,6 +331,10 @@ Measured behaviour of this axis, for the next person:
   stderr; `src/youtube/ytdlp.ts` answers `503 YTDLP_PROXY_UNREACHABLE` when
   *every* configured egress is dead, versus `502` when YouTube refuses a live
   one, so the two failures are distinguishable from the status code alone.
+- Gate 4 asserts the audio variant (`?audio=1`) for the music ids — that is the
+  shape the TV's music screen plays — and both the video variant and the audio
+  variant for `dQw4w9WgXcQ`. The music ids' *video* variant is not a product
+  path and is bot-checked independently, so it is not gated.
 
 ## Secrets
 
@@ -401,7 +430,8 @@ the image `release.yml` used to, and the Codeberg mirror needs a
 | gate 3: first segment `403`, body `Attention Required \| Cloudflare` | the media fetch is carrying a `Referer`/`Origin`: the CDN's hotlink rule rejects both. The provider must embed media headers without them (see "Upstream behaviours this fork works around") |
 | gate 3: first segment returns HTML (first byte not `0x47`) or is tiny | the playlist advertises pages instead of media — provider rot. Gate 3 exists so this never ships as "working" again |
 | gate 3: master 200 with no variants, or media playlist with no segments | the provider returned a stub playlist; check the resolve diagnostics for the provider's own error |
-| gate 4: `502` for music videos only, message names "Sign in to confirm you're not a bot" | the egress is bot-checked. Check the lane sidecar first (`deploy/compose.prod.yml`, section "The egress this stack actually uses"): the gate's first line prints the lane control plane's state through `/v1/proxy`, and a 502 on **every** id and every client family despite a healthy sidecar means even the WARP lanes are flagged on that day. `bgutil-provider` being down is *not* this failure — it was measured not to change it |
+| gate 4: `502` for music videos only, message names "Sign in to confirm you're not a bot" | the egress is bot-checked. Check the lane sidecar first (`deploy/compose.prod.yml`, section "The egress this stack actually uses"): the gate's first line prints the lane control plane's state through `/v1/proxy`, and a 502 on **every** id and every client family despite a healthy sidecar means every WARP lane is flagged on that day. `bgutil-provider` being down is *not* this failure — it was measured not to change it. The next lever after that is signed-in cookies, which the owner supplies; do not add them unilaterally |
+| gate 4: audio answers `502 UPSTREAM_UNREACHABLE` "fetch failed" although the log shows `[YouTube] resolved <id> (audio) … through egress <lane>` | the URL was minted by a lane and fetched from somewhere else — googlevideo scopes those URLs to the resolving egress. `ResolvedMedia.proxy` records the lane and `fetchUpstream` sends the GET through that lane's `ProxyAgent`; if this recurs, confirm both are still wired and that the media path still uses undici's own `fetch` (see the note on the global fetch dropping headers under a dispatcher) |
 | gate 4: the lane control plane line prints a non-200 | `lane-egress` is not up or not reachable from Core: check that service's log in Dokploy (`LANE_TOKEN must be set` means the app env lost the token; a first boot takes ~4 min for WARP pool registration). A lane reading `degraded`/`quarantined` there is still perfectly usable — those probes are zen, not YouTube |
 | gate 4: `503 YTDLP_PROXY_UNREACHABLE` | every `YTDLP_PROXY` entry refused the connection: the sidecar's lane ports are not listening (boot still running, or xray failed to start — see its container log). Distinct from a 502, which means the lane answered and YouTube refused |
 | gate 4: `502 YTDLP_NO_FORMAT` "Requested format is not available" on video but audio is fine | the video client list lost its muxed client — video must resolve through `android` (or `android_vr`), never through `default`/`ios`/`mweb` alone |

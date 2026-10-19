@@ -10,6 +10,8 @@
 
 import { Readable, Transform, type TransformCallback } from 'node:stream';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { fetch as undiciFetch, ProxyAgent } from 'undici';
+import { retryTransient } from '../fetchRetry.js';
 import { resolveMedia, YouTubeError, type ResolvedMedia } from './ytdlp.js';
 
 /** A YouTube video id is exactly 11 URL-safe base64 characters. */
@@ -100,6 +102,27 @@ function sendError(
     });
 }
 
+/**
+ * One agent per lane: each holds its own CONNECT pool, and a resolve records
+ * which lane minted its URL. The byte fetch has to leave through that same
+ * lane — measured in production, a music track resolved through
+ * `http://lane-egress:8002` and then died on `fetch failed` when the Core host
+ * fetched it direct, because googlevideo scopes the URL to the resolving egress.
+ */
+const proxyAgents = new Map<string, ProxyAgent>();
+
+function dispatcherFor(proxy: string | null): ProxyAgent | undefined {
+    if (!proxy) {
+        return undefined;
+    }
+    let agent = proxyAgents.get(proxy);
+    if (!agent) {
+        agent = new ProxyAgent(proxy);
+        proxyAgents.set(proxy, agent);
+    }
+    return agent;
+}
+
 async function fetchUpstream(
     media: ResolvedMedia,
     range: string | undefined,
@@ -113,7 +136,27 @@ async function fetchUpstream(
     if (range) {
         headers.Range = range;
     }
-    return await fetch(media.url, { headers, redirect: 'follow', signal });
+    const dispatcher = dispatcherFor(media.proxy);
+    if (!dispatcher) {
+        return await fetch(media.url, { headers, redirect: 'follow', signal });
+    }
+    // The proxied path must use undici's own fetch, not the global one: the
+    // global fetch is Node's bundled undici, and handing it a dispatcher from
+    // the undici package returns the right status and body with *every*
+    // response header missing (measured: 206, headers empty) — which would
+    // lose Content-Range and Content-Type downstream.
+    return await retryTransient(
+        async () =>
+            (await undiciFetch(media.url, {
+                headers,
+                redirect: 'follow',
+                signal,
+                dispatcher
+            })) as unknown as Response,
+        true,
+        undefined,
+        'GET media'
+    );
 }
 
 interface UpstreamFetch {

@@ -112,6 +112,14 @@ export interface ResolvedMedia {
     headers: Record<string, string>;
     contentType: string;
     size: number | null;
+    /**
+     * HTTP CONNECT proxy the resolve ran through, null when the resolve was
+     * direct. The media URL can be bound to the resolving egress (googlevideo
+     * hands out IPv6 or IP-scoped hosts when the resolve came from a tunnel),
+     * so the byte fetch has to leave through the same lane or it fails
+     * transport-level while the URL is still valid.
+     */
+    proxy: string | null;
 }
 
 interface YtDlpFormat {
@@ -317,7 +325,8 @@ async function attemptResolve(
         url: format.url,
         headers: format.http_headers ?? {},
         contentType: contentTypeFor(format, audio),
-        size: format.filesize ?? format.filesize_approx ?? null
+        size: format.filesize ?? format.filesize_approx ?? null,
+        proxy: proxy || null
     };
 }
 

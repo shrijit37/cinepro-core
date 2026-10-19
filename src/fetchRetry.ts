@@ -75,27 +75,42 @@ export function installFetchRetry(
         const method = (
             init?.method ?? (input instanceof Request ? input.method : 'GET')
         ).toUpperCase();
-        const retryableMethod = method === 'GET' || method === 'HEAD';
-
-        for (let attempt = 0; ; attempt++) {
-            try {
-                return await original(input, init);
-            } catch (error) {
-                const nextDelay = retryDelaysMs[attempt];
-                if (
-                    !retryableMethod ||
-                    nextDelay === undefined ||
-                    !isTransient(error)
-                ) {
-                    throw error;
-                }
-                console.warn(
-                    `[FetchRetry] transient ${method} failure (${
-                        error instanceof Error ? error.message : String(error)
-                    }) — retrying in ${nextDelay}ms`
-                );
-                await delay(nextDelay);
-            }
-        }
+        return await retryTransient(
+            () => original(input, init),
+            method === 'GET' || method === 'HEAD',
+            retryDelaysMs,
+            method
+        );
     };
+}
+
+/**
+ * Run one idempotent attempt, retrying transport-level failures on the same
+ * backoff schedule as the global fetch wrapper. Shared so a caller that must
+ * use a different fetch implementation (the proxied media path cannot use the
+ * global one — Node's bundled undici drops response headers when handed a
+ * dispatcher from the undici package) keeps identical retry behaviour.
+ */
+export async function retryTransient<T>(
+    attempt: () => Promise<T>,
+    retryable: boolean,
+    retryDelaysMs: readonly number[] = RETRY_DELAYS_MS,
+    label = 'GET'
+): Promise<T> {
+    for (let attemptIndex = 0; ; attemptIndex++) {
+        try {
+            return await attempt();
+        } catch (error) {
+            const nextDelay = retryDelaysMs[attemptIndex];
+            if (!retryable || nextDelay === undefined || !isTransient(error)) {
+                throw error;
+            }
+            console.warn(
+                `[FetchRetry] transient ${label} failure (${
+                    error instanceof Error ? error.message : String(error)
+                }) — retrying in ${nextDelay}ms`
+            );
+            await delay(nextDelay);
+        }
+    }
 }
