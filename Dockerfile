@@ -56,11 +56,22 @@ COPY --from=builder /app/dist ./dist
 # bgutil-ytdlp-pot-provider is the yt-dlp side of the PoToken provider service
 # in deploy/compose.prod.yml: without a PoToken YouTube answers this host with
 # "Sign in to confirm you're not a bot" and hands out throttled media URLs.
+#
+# `yt-dlp[default]` is not a nicety: since 2025 yt-dlp solves YouTube's `n`
+# signature challenge with an external JavaScript component (`yt-dlp-ejs`), and
+# without it the player response loses formats and degrades into the same
+# "Sign in to confirm you're not a bot" error. Measured in production before
+# this was installed: `WARNING: [youtube] <id>: Signature solving failed … /
+# n challenge solving failed … Ensure you have a supported JavaScript runtime
+# and challenge solver script distribution installed`. The runtime is the
+# image's own node (`--js-runtimes node` in src/youtube/ytdlp.ts) — no extra
+# binary to ship, and no `--remote-components`, which would fetch solver code
+# from GitHub at resolve time.
 ARG YTDLP_VERSION=2026.08.19
 ARG BGUTIL_VERSION=2.0.2
 RUN apk add --no-cache python3 py3-pip && \
     pip install --break-system-packages --no-cache-dir --root-user-action=ignore \
-        "yt-dlp==${YTDLP_VERSION}" \
+        "yt-dlp[default]==${YTDLP_VERSION}" \
         "bgutil-ytdlp-pot-provider==${BGUTIL_VERSION}" && \
     rm -rf /root/.cache/pip
 

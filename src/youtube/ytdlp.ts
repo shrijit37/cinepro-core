@@ -96,6 +96,17 @@ const AUDIO_FORMAT = 'bestaudio[ext=m4a]/bestaudio';
  * resolve).
  */
 const VERBOSE = process.env.YTDLP_VERBOSE === '1';
+/**
+ * The JavaScript runtime yt-dlp uses to solve YouTube's `n` signature
+ * challenge, through the `yt-dlp-ejs` component the Dockerfile installs with
+ * `yt-dlp[default]`. Deno is yt-dlp's auto-detected default and is not in this
+ * image; the runtime here is the image's own `node`. Without one, yt-dlp logs
+ * "Signature solving failed / n challenge solving failed … Ensure you have a
+ * supported JavaScript runtime" and the player response loses formats, which
+ * ends as the same "Sign in to confirm you're not a bot" 502. Empty disables
+ * the flag (local runs on an image without ejs).
+ */
+const JS_RUNTIMES = process.env.YTDLP_JS_RUNTIMES ?? 'node';
 
 /** yt-dlp can be slow on a cold cache; the resolve itself rarely takes >10 s. */
 const RESOLVE_TIMEOUT_MS = Number(
@@ -257,6 +268,7 @@ async function attemptResolve(
         // and a diagnosis, and they end up in the error body below.
         ...(VERBOSE ? ['-v'] : []),
         ...(proxy ? ['--proxy', proxy] : []),
+        ...(JS_RUNTIMES ? ['--js-runtimes', JS_RUNTIMES] : []),
         '--no-playlist',
         '--no-progress',
         '--no-cache-dir',

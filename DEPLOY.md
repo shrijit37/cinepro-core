@@ -21,9 +21,10 @@ git push main
   → gate 3: that source's HLS chain serves a real MPEG-TS segment (0x47)
   → gate 4: the lane-egress control plane is reachable from inside Core, and
             ?audio=1 for all four ids (including dQw4w9WgXcQ) answers 206 at
-            0-1048575, 0-1023 and a mid-file range with `ftyp` at byte 4,
-            while dQw4w9WgXcQ's video variant streams the same ranges. This is
-            the gate that says "the egress works"
+            0-1048575, 0-1023, a mid-file range and bytes=0-0 (Content-Range
+            `bytes 0-0/<total>`) with `ftyp` at byte 4, then 200 with the whole
+            file for a plain GET; dQw4w9WgXcQ's video variant streams the same
+            ranges. This is the gate that says "the egress works"
 ```
 
 Nothing is built on the server. This repo is a mirror of `cinepro-org/core`
@@ -430,6 +431,7 @@ the image `release.yml` used to, and the Codeberg mirror needs a
 | gate 3: first segment `403`, body `Attention Required \| Cloudflare` | the media fetch is carrying a `Referer`/`Origin`: the CDN's hotlink rule rejects both. The provider must embed media headers without them (see "Upstream behaviours this fork works around") |
 | gate 3: first segment returns HTML (first byte not `0x47`) or is tiny | the playlist advertises pages instead of media — provider rot. Gate 3 exists so this never ships as "working" again |
 | gate 3: master 200 with no variants, or media playlist with no segments | the provider returned a stub playlist; check the resolve diagnostics for the provider's own error |
+| yt-dlp stderr says `Signature solving failed … / n challenge solving failed … Ensure you have a supported JavaScript runtime and challenge solver script distribution installed` | the image lost `yt-dlp-ejs` (the `yt-dlp[default]` extra in the Dockerfile) or the `--js-runtimes node` flag (`YTDLP_JS_RUNTIMES`). Without them yt-dlp cannot solve YouTube's `n` challenge, the player response loses formats, and the failure surfaces as the bot check. Check `docker logs` for `JS runtimes: node-…` at `YTDLP_VERBOSE=1` |
 | gate 4: `502` for music videos only, message names "Sign in to confirm you're not a bot" | the egress is bot-checked. Check the lane sidecar first (`deploy/compose.prod.yml`, section "The egress this stack actually uses"): the gate's first line prints the lane control plane's state through `/v1/proxy`, and a 502 on **every** id and every client family despite a healthy sidecar means every WARP lane is flagged on that day. `bgutil-provider` being down is *not* this failure — it was measured not to change it. The next lever after that is signed-in cookies, which the owner supplies; do not add them unilaterally |
 | gate 4: audio answers `502 UPSTREAM_UNREACHABLE` "fetch failed" although the log shows `[YouTube] resolved <id> (audio) … through egress <lane>` | the URL was minted by a lane and fetched from somewhere else — googlevideo scopes those URLs to the resolving egress. `ResolvedMedia.proxy` records the lane and `fetchUpstream` sends the GET through that lane's `ProxyAgent`; if this recurs, confirm both are still wired and that the media path still uses undici's own `fetch` (see the note on the global fetch dropping headers under a dispatcher) |
 | gate 4: the lane control plane line prints a non-200 | `lane-egress` is not up or not reachable from Core: check that service's log in Dokploy (`LANE_TOKEN must be set` means the app env lost the token; a first boot takes ~4 min for WARP pool registration). A lane reading `degraded`/`quarantined` there is still perfectly usable — those probes are zen, not YouTube |

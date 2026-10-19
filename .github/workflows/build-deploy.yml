@@ -342,7 +342,7 @@ jobs:
           # uses: a megabyte at the start, a 1 KiB head range, and a mid-file
           # range derived from the total the server reports.
           check_stream() {
-            local id=$1 suffix=$2 want_brand=$3 code size total half end brand
+            local id=$1 suffix=$2 want_brand=$3 code size total half end brand crange
             local url="$APP_URL/v1/youtube/$id$suffix"
             code=$(curl -s -D yt_headers.txt -o yt_first.bin -w '%{http_code}' --max-time 180 \
               -u "$BASIC_AUTH" -H 'Range: bytes=0-1048575' "$url")
@@ -367,6 +367,17 @@ jobs:
               return 1
             fi
 
+            # Byte 0 alone: the boundary the player uses to probe ranges
+            # before it opens a seek.
+            code=$(curl -s -D yt_headers.txt -o yt_one.bin -w '%{http_code}' --max-time 180 \
+              -u "$BASIC_AUTH" -H 'Range: bytes=0-0' "$url")
+            size=$(wc -c < yt_one.bin)
+            crange=$(grep -i '^content-range:' yt_headers.txt | tr -d '\r' | sed -E 's/^[^:]*: *//')
+            echo "  $id$suffix  range 0-0 -> HTTP $code, $size bytes, content-range '$crange'"
+            [ "$code" = "206" ] || { echo "::error::$id$suffix: bytes=0-0 expected 206, got $code: $(body yt_one.bin)"; return 1; }
+            [ "$size" = "1" ] || { echo "::error::$id$suffix: bytes=0-0 returned $size bytes, expected 1"; return 1; }
+            [ "$crange" = "bytes 0-0/$total" ] || { echo "::error::$id$suffix: bytes=0-0 Content-Range was '$crange', expected 'bytes 0-0/$total'"; return 1; }
+
             half=$(( total / 2 ))
             end=$(( half + 1023 ))
             code=$(curl -s -o yt_mid.bin -w '%{http_code}' --max-time 180 \
@@ -375,6 +386,17 @@ jobs:
             echo "  $id$suffix  range $half-$end -> HTTP $code, $size bytes"
             [ "$code" = "206" ] || { echo "::error::$id$suffix: mid-file range returned $code: $(body yt_mid.bin)"; return 1; }
             [ "$size" = "1024" ] || { echo "::error::$id$suffix: mid-file range returned $size bytes, expected 1024"; return 1; }
+
+            # A plain GET (no Range) must answer 200 with the whole file: the
+            # player's first request for a track is often unbounded, and a
+            # response that only works for ranges is not a working stream.
+            code=$(curl -s -D yt_headers.txt -o yt_full.bin -w '%{http_code}' --max-time 300 \
+              -u "$BASIC_AUTH" "$url")
+            size=$(wc -c < yt_full.bin)
+            echo "  $id$suffix  plain GET -> HTTP $code, $size bytes (total $total)"
+            [ "$code" = "200" ] || { echo "::error::$id$suffix: plain GET expected 200, got $code: $(body yt_full.bin)"; return 1; }
+            [ "$size" = "$total" ] || { echo "::error::$id$suffix: plain GET returned $size bytes, expected $total"; return 1; }
+            rm -f yt_full.bin
             return 0
           }
 
