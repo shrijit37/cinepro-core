@@ -170,6 +170,42 @@ Implementation notes for whoever touches this next:
   host gets bot-checked for — gate 4 catches that, so a dead provider is a red
   deploy, not a silent one.
 
+### When YouTube refuses the host and not the client
+
+The four ids in gate 4 are also the diagnostic. On a host whose egress IP
+YouTube has flagged, the answer is not "another client family" — it is the same
+message for every family, and it is reproducible:
+
+```
+dQw4w9WgXcQ   -> 206 (resolved, then cached for an hour)
+kJQP7kiw5Fk   -> 502  clients android_vr     "Sign in to confirm you're not a bot"
+zAiIgYOH4Ys   -> 502  clients android        same
+09R8_2nJtjg   -> 502  clients web            same
+aqz-KE-bpKQ   -> 502  clients android_vr     same   (a Creative Commons video: not content policy)
+```
+
+The two levers that do **not** work, both measured on this host:
+
+- **A PoToken.** The `bgutil-provider` service is up and reachable from the
+  container (probe it with `/v1/proxy?data={"url":"http://bgutil-provider:4416/ping"}`),
+  and yt-dlp's plugin is loaded (the container's `yt-dlp -v` prints
+  `PO Token Providers: bgutil:http-2.0.2`). But the plugin only serves the
+  webpo clients (`web`, `mweb`, `tv`, `web_embedded` …), never the `android`
+  family, and on this host the webpo clients are also the ones YouTube answers
+  with the SABR experiment (`Some web client https formats have been skipped as
+  they are missing a URL`) — so there is no client that is both attested and
+  downloadable.
+- **A wider client list.** `android`, `android_vr`, `ios`, `web`, `mweb`, `tv`,
+  `tv_simply`, `web_embedded` and `web_creator` were each tried on this host:
+  all of them answer the bot check once the IP is flagged.
+
+What works is a different egress. `YTDLP_PROXY` (any `http://`, `socks5://`,
+`socks5h://` URL) is passed straight to yt-dlp, and the same request through a
+residential connection resolves `android` → format 18 (muxed 360p MP4) and
+`default` → format 140 (m4a) with no cookies. `YTDLP_VERBOSE=1` adds `-v`, and
+every failed attempt logs yt-dlp's full stderr to the container log (the HTTP
+error keeps the short tail — a launcher reads that one).
+
 ## Secrets
 
 App secrets, in Doppler **project `platform`, config `prd`**:
@@ -213,10 +249,14 @@ slash.
 
 The `/v1/youtube/*` endpoint also reads optional overrides; the defaults are the
 tested ones and none of them is set in `deploy/app.env`: `YTDLP_PATH`
-(`yt-dlp`), `YTDLP_VIDEO_CLIENTS` (`android`), `YTDLP_AUDIO_CLIENTS`
-(`default`), `YOUTUBE_CACHE_TTL` seconds (3600), `YOUTUBE_RESOLVE_TIMEOUT_MS`
-(30000). Empty `YTDLP_POT_URL` disables PoTokens (local runs without the
-provider service).
+(`yt-dlp`), `YTDLP_VIDEO_CLIENTS` (`android;web_embedded;mweb;android_vr`),
+`YTDLP_AUDIO_CLIENTS` (`default;web_embedded;mweb;android;ios+web`),
+`YTDLP_PROXY` (empty — yt-dlp's `--proxy`, the lever when YouTube bot-checks
+this host's egress IP), `YTDLP_VERBOSE` (`0`), `YOUTUBE_CACHE_TTL` seconds
+(3600), `YOUTUBE_RESOLVE_TIMEOUT_MS` (30000). Empty `YTDLP_POT_URL` disables
+PoTokens (local runs without the provider service); a candidate list is
+`;`-separated, candidates are tried in order, and `+` stands for a `,` inside a
+candidate (`ios+web`).
 
 ## Repo configuration
 
@@ -251,6 +291,7 @@ the image `release.yml` used to, and the Codeberg mirror needs a
 | gate 4: `502` for music videos only, message names "Sign in to confirm you're not a bot" | either the client list includes `tv_embedded`/`web_safari` (the hardest bot-checked families) or `bgutil-provider` is not up, so `yt-dlp` has no PoToken. Check the service is running and `YTDLP_POT_URL` points at it |
 | gate 4: `502 YTDLP_NO_FORMAT` "Requested format is not available" on video but audio is fine | the video client list lost its muxed client — video must resolve through `android` (or `android_vr`), never through `default`/`ios`/`mweb` alone |
 | gate 4: `502 YTDLP_FAILED` / `YTDLP_NO_FORMAT` | yt-dlp's YouTube extractor is broken or every client family is blocked for this video/IP. Bump the `YTDLP_VERSION` pin in the Dockerfile to a release that works, then re-run the deploy |
+| gate 4: `502` with the bot check for **every** id and every client family, including one that resolved minutes earlier on the same deploy | the host's egress IP is bot-checked, which is a property of the IP and not of this code. Confirm with `curl -s -u "$AUTH" "$APP_URL/v1/proxy?data=%7B%22url%22%3A%22https%3A%2F%2Fwww.youtube.com%2Frobots.txt%22%7D"` (the container reaches YouTube fine — it is the InnerTube *player* request that is refused). Fix is an egress change (`YTDLP_PROXY`), **not** another client list; a residential connection resolves these same ids with the pinned clients |
 | gate 4: range request answered 200 with the whole file, or 403 | the endpoint is not honouring `Range` — check it is not redirecting to googlevideo, and that the upstream fetch forwards the client's `Range` header |
 | gate 4: audio variant has no `ftyp` at byte 4 | `bestaudio[ext=m4a]` fell through to WebM/Opus; the TV plays that badly — check the extractor still offers the m4a track |
 | `Unresolved vault reference` in Dokploy's deploy log | an env value was replaced with a `{{vault.*}}` ref by hand; this stack resolves no vault refs |

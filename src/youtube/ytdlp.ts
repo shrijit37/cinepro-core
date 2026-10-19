@@ -71,6 +71,21 @@ const AUDIO_CLIENT_FALLBACKS = clientCandidates(AUDIO_CLIENTS);
  */
 const POT_PROVIDER_URL =
     process.env.YTDLP_POT_URL ?? 'http://bgutil-provider:4416';
+/**
+ * Optional egress proxies for yt-dlp (`http://`, `socks5://`, `socks5h://`),
+ * `;`-separated and tried in order — the fleet's WARP lane pool is a list of
+ * HTTP CONNECT proxies, one egress IP per lane, and a lane that has been
+ * flagged has to be rotated past rather than retried.
+ *
+ * This exists because YouTube bot-checks unattested requests from a flagged IP
+ * regardless of client or PoToken, which is a property of the host, not of this
+ * code: the same request from a residential connection resolves. An egress
+ * change is the only lever short of cookies.
+ */
+const PROXIES: string[] = (process.env.YTDLP_PROXY ?? '')
+    .split(';')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 const VIDEO_FORMAT = 'b[ext=mp4][height<=720]/b[height<=720]/b';
 const AUDIO_FORMAT = 'bestaudio[ext=m4a]/bestaudio';
 /**
@@ -225,13 +240,15 @@ const inFlight = new Map<string, Promise<ResolvedMedia>>();
 async function attemptResolve(
     videoId: string,
     audio: boolean,
-    clients: string
+    clients: string,
+    proxy: string
 ): Promise<ResolvedMedia> {
     const args = [
         // Deliberately no `--no-warnings`: the PoToken plugin's warnings
         // ("failed to fetch a token") are the difference between a mystery 502
         // and a diagnosis, and they end up in the error body below.
         ...(VERBOSE ? ['-v'] : []),
+        ...(proxy ? ['--proxy', proxy] : []),
         '--no-playlist',
         '--no-progress',
         '--no-cache-dir',
@@ -267,7 +284,7 @@ async function attemptResolve(
             'YTDLP_FAILED',
             `yt-dlp could not resolve ${videoId} (clients ${clients}, pot ${
                 POT_PROVIDER_URL || 'off'
-            }): ${stderrTail(error)}`,
+            }${proxy ? `, egress ${proxy}` : ''}): ${stderrTail(error)}`,
             502
         );
     }
@@ -289,7 +306,9 @@ async function attemptResolve(
             'YTDLP_NO_FORMAT',
             `yt-dlp found no ${
                 audio ? 'audio' : 'video'
-            } format for ${videoId} (clients ${clients})`,
+            } format for ${videoId} (clients ${clients}${
+                proxy ? `, egress ${proxy}` : ''
+            })`,
             502
         );
     }
@@ -300,6 +319,20 @@ async function attemptResolve(
         contentType: contentTypeFor(format, audio),
         size: format.filesize ?? format.filesize_approx ?? null
     };
+}
+
+/**
+ * A dead lane and a flagged lane must not look the same: the first is an
+ * infrastructure fault on our side (503, fix the sidecar), the second is
+ * YouTube refusing this egress (502, rotate). yt-dlp reports a proxy it cannot
+ * reach as a refused TCP connection with no other "proxy" marker in the text.
+ */
+const PROXY_UNREACHABLE_RE =
+    /\[Errno 111\] Connection refused|\[Errno 101\] Network is unreachable|Unable to connect to proxy|ProxyError|Tunnel connection failed/;
+
+function isProxyFailure(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return PROXY_UNREACHABLE_RE.test(message);
 }
 
 async function resolveUncached(
@@ -314,17 +347,57 @@ async function resolveUncached(
     const clientFallbacks = audio
         ? AUDIO_CLIENT_FALLBACKS
         : VIDEO_CLIENT_FALLBACKS;
-    for (const clients of clientFallbacks) {
-        try {
-            return await attemptResolve(videoId, audio, clients);
-        } catch (error) {
-            lastError = error;
-            console.warn(
-                `[YouTube] resolve failed for ${videoId} with clients ${clients}: ${
-                    error instanceof Error ? error.message : String(error)
-                }`
-            );
+    // `''` keeps the no-proxy path identical to the pre-lane behaviour.
+    const egresses = PROXIES.length > 0 ? PROXIES : [''];
+    let proxyFailures = 0;
+    for (const proxy of egresses) {
+        for (const clients of clientFallbacks) {
+            try {
+                const media = await attemptResolve(
+                    videoId,
+                    audio,
+                    clients,
+                    proxy
+                );
+                if (proxy) {
+                    console.log(
+                        `[YouTube] resolved ${videoId} (${
+                            audio ? 'audio' : 'video'
+                        }) via client ${clients} through egress ${proxy}`
+                    );
+                }
+                return media;
+            } catch (error) {
+                lastError = error;
+                if (proxy && isProxyFailure(error)) {
+                    proxyFailures += 1;
+                    console.warn(
+                        `[YouTube] egress ${proxy} unreachable for ${videoId}: ${
+                            error instanceof Error
+                                ? error.message
+                                : String(error)
+                        }`
+                    );
+                    break; // this lane is down; rotating is the only move
+                }
+                console.warn(
+                    `[YouTube] resolve failed for ${videoId} with clients ${clients}${
+                        proxy ? ` via egress ${proxy}` : ''
+                    }: ${error instanceof Error ? error.message : String(error)}`
+                );
+            }
         }
+    }
+    if (PROXIES.length > 0 && proxyFailures === PROXIES.length) {
+        throw new YouTubeError(
+            'YTDLP_PROXY_UNREACHABLE',
+            `every configured egress refused ${videoId}: ${PROXIES.join(', ')} (${
+                lastError instanceof Error
+                    ? lastError.message
+                    : String(lastError)
+            })`,
+            503
+        );
     }
     throw lastError;
 }
