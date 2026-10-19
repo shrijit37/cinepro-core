@@ -64,7 +64,10 @@ export function installFetchRetry(retryDelayMs = 250): void {
         try {
             return await original(input, init);
         } catch (error) {
-            if ((method !== 'GET' && method !== 'HEAD') || !isTransient(error)) {
+            if (
+                (method !== 'GET' && method !== 'HEAD') ||
+                !isTransient(error)
+            ) {
                 throw error;
             }
             await delay(retryDelayMs);
