@@ -183,7 +183,14 @@ async function openUpstream(
         return { response, media };
     }
     await response.body?.cancel().catch(() => undefined);
-    const refreshed = await resolveMedia(videoId, audio, { force: true });
+    // A refused URL is re-resolved on the lanes, never on the signed-in direct
+    // path: measured at cold start, a direct URL from this host answered 403
+    // while the same id fetched through a lane streamed normally, and a lane URL
+    // is attested because the same lane mints and fetches it.
+    const refreshed = await resolveMedia(videoId, audio, {
+        force: true,
+        laned: true
+    });
     return {
         response: await fetchUpstream(refreshed, range, signal),
         media: refreshed

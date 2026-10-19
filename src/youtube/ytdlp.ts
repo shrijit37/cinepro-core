@@ -459,7 +459,8 @@ function orderedClients(
 
 async function resolveUncached(
     videoId: string,
-    audio: boolean
+    audio: boolean,
+    laned = false
 ): Promise<ResolvedMedia> {
     const variant = audio ? 'audio' : 'video';
     const clientFallbacks = audio
@@ -475,7 +476,7 @@ async function resolveUncached(
     // egress-binding trap (the URL is minted and fetched by the same address).
     // It gets one candidate; if YouTube still refuses, the lane rotation below
     // runs exactly as it did before cookies existed.
-    if (cookieFile() && PROXIES.length > 0) {
+    if (!laned && cookieFile() && PROXIES.length > 0) {
         const clients = orderedClients(clientFallbacks, variant)[0];
         try {
             const media = await attemptResolve(videoId, audio, clients, '');
@@ -545,7 +546,16 @@ async function resolveUncached(
 export async function resolveMedia(
     videoId: string,
     audio: boolean,
-    options: { force?: boolean } = {}
+    options: {
+        force?: boolean;
+        /**
+         * Skip the signed-in direct attempt and go straight to the lanes. Used
+         * when the direct URL resolved but googlevideo refused the bytes: the
+         * lane URL is minted and fetched from the same lane, so it is attested
+         * where the direct one was not.
+         */
+        laned?: boolean;
+    } = {}
 ): Promise<ResolvedMedia> {
     const key = `${videoId}:${audio ? 'audio' : 'video'}`;
 
@@ -560,7 +570,11 @@ export async function resolveMedia(
         }
     }
 
-    const pending = resolveUncached(videoId, audio).then(
+    const pending = resolveUncached(
+        videoId,
+        audio,
+        options.laned === true
+    ).then(
         (media) => {
             cache.set(key, { media, expiresAt: Date.now() + CACHE_TTL_MS });
             inFlight.delete(key);
