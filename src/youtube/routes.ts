@@ -106,7 +106,7 @@ function sendError(
  * One agent per lane: each holds its own CONNECT pool, and a resolve records
  * which lane minted its URL. The byte fetch has to leave through that same
  * lane — measured in production, a music track resolved through
- * `http://lane-egress:8002` and then died on `fetch failed` when the Core host
+ * `http://lane-egress:8002` (now `cinepro-lane-egress`) and then died on `fetch failed` when the Core host
  * fetched it direct, because googlevideo scopes the URL to the resolving egress.
  */
 const proxyAgents = new Map<string, ProxyAgent>();

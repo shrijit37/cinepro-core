@@ -19,7 +19,7 @@ git push main
   → gate 2: anonymous /v1/health, /v1/movies/550, /v1/proxy → 401; then an
             authenticated /v1/movies/550 → ≥1 source
   → gate 3: that source's HLS chain serves a real MPEG-TS segment (0x47)
-  → gate 4: the lane-egress control plane is reachable from inside Core, and
+  → gate 4: the cinepro-lane-egress control plane answers 200 with four lanes, and
             ?audio=1 for all four ids (including dQw4w9WgXcQ) answers 206 at
             0-1048575, 0-1023, a mid-file range and bytes=0-0 (Content-Range
             `bytes 0-0/<total>`) with `ftyp` at byte 4, then 200 with the whole
@@ -268,7 +268,7 @@ residential connection resolves `android` → format 18 (muxed 360p MP4) and
 every failed attempt logs yt-dlp's full stderr to the container log (the HTTP
 error keeps the short tail — a launcher reads that one).
 
-### The egress this stack actually uses: `lane-egress` (WARP)
+### The egress this stack actually uses: `cinepro-lane-egress` (WARP)
 
 `deploy/compose.prod.yml` runs a third service, `cinepro-lane-egress`, and
 `YTDLP_PROXY` points at it:
@@ -376,7 +376,7 @@ App secrets, in Doppler **project `platform`, config `prd`**:
 | `CINEPRO_TMDB_API_KEY` | TMDB v3 key the resolver needs; empty key = a Core that resolves nothing |
 | `CINEPRO_CORE_URL` | `https://cinepro-core.shrijit.tech` — for clients (the TV launcher) |
 | `CINEPRO_CORE_BASIC_AUTH` | `cinepro:<password>` — the Traefik basic-auth credential |
-| `CINEPRO_LANE_TOKEN` | bearer token for the `lane-egress` sidecar's control plane (`:9100`, `status`/`rotate`/`run_cmd`). A control-plane token inside this stack, not a credential for anything outside it — but `run_cmd` is root execution in that container, so it is delivered like a secret rather than committed |
+| `CINEPRO_LANE_TOKEN` | bearer token for the `cinepro-lane-egress` sidecar's control plane (`:9100`, `status`/`rotate`/`run_cmd`). A control-plane token inside this stack, not a credential for anything outside it — but `run_cmd` is root execution in that container, so it is delivered like a secret rather than committed |
 
 How they reach the container: the deploy job reads Doppler with the read-only
 config-scoped service token in the repo secret `DOPPLER_TOKEN`
@@ -385,7 +385,7 @@ config-scoped service token in the repo secret `DOPPLER_TOKEN`
 `LANE_TOKEN=__LANE_TOKEN__` substituted — through
 `compose.saveEnvironment` on every deploy, so the container's `.env` is
 rebuilt from Doppler each time and a cleared env block cannot survive a deploy.
-That `.env` is also the compose env, so `lane-egress`'s
+That `.env` is also the compose env, so `cinepro-lane-egress`'s
 `LANE_TOKEN: ${LANE_TOKEN:?…}` interpolation resolves from it too.
 The job fails if `CINEPRO_TMDB_API_KEY`, `CINEPRO_CORE_BASIC_AUTH` or
 `CINEPRO_LANE_TOKEN` is empty (an empty secret is a service that looks alive and
@@ -415,7 +415,7 @@ proxy URLs against it — it must match the public hostname and carry no trailin
 slash.
 
 The `/v1/youtube/*` endpoint also reads optional overrides. Set in
-`deploy/app.env`: `YTDLP_PROXY` (`http://lane-egress:8001;http://lane-egress:8002`
+`deploy/app.env`: `YTDLP_PROXY` (`http://cinepro-lane-egress:8001;…`
 — the WARP lanes above; an empty value means yt-dlp dials from this host's own
 bot-checked egress, which is the broken state this replaced). Not set, so the
 tested defaults apply: `YTDLP_PATH` (`yt-dlp`), `YTDLP_VIDEO_CLIENTS`
@@ -457,14 +457,14 @@ the image `release.yml` used to, and the Codeberg mirror needs a
 | any resolve answers `503 UPSTREAM_UNAVAILABLE` (`details.retryAfterSeconds: 5`) | TMDB was unreachable for longer than the fetch retries' ~5.5 s budget. This is the honest, retryable answer — the client should retry, not treat it as a Core bug (`src/tmdbResilience.ts`) |
 | a resolve is `404 NO_SOURCES_AVAILABLE` whose diagnostics mention `Dead source dropped` | every source the providers returned failed the liveness probe. Read the dropped URLs in the diagnostic; if a provider's URLs are consistently dead, that provider is broken. `SOURCE_LIVENESS=0` disables the probe if it turns out to be too strict |
 | a resolve's diagnostics mention `Dead source dropped` but a good source remains | working as intended: the dead URL was dropped before it reached the player (`src/sourceLiveness.ts`) |
-| gate 4: `502` with the bot check for **every** id and every client family, including one that resolved minutes earlier on the same deploy | the egress IP is bot-checked, which is a property of the IP and not of this code. Confirm with `curl -s -u "$AUTH" "$APP_URL/v1/proxy?data=%7B%22url%22%3A%22https%3A%2F%2Fwww.youtube.com%2Frobots.txt%22%7D"` (the container reaches YouTube fine — it is the InnerTube *player* request that is refused). The fix is an egress change, **not** another client list; this stack's answer is the `lane-egress` WARP sidecar behind `YTDLP_PROXY` |
+| gate 4: `502` with the bot check for **every** id and every client family, including one that resolved minutes earlier on the same deploy | the egress IP is bot-checked, which is a property of the IP and not of this code. Confirm with `curl -s -u "$AUTH" "$APP_URL/v1/proxy?data=%7B%22url%22%3A%22https%3A%2F%2Fwww.youtube.com%2Frobots.txt%22%7D"` (the container reaches YouTube fine — it is the InnerTube *player* request that is refused). The fix is an egress change, **not** another client list; this stack's answer is the `cinepro-lane-egress` WARP sidecar behind `YTDLP_PROXY` |
 | gate 3: first segment `403`, body `Attention Required \| Cloudflare` | the media fetch is carrying a `Referer`/`Origin`: the CDN's hotlink rule rejects both. The provider must embed media headers without them (see "Upstream behaviours this fork works around") |
 | gate 3: first segment returns HTML (first byte not `0x47`) or is tiny | the playlist advertises pages instead of media — provider rot. Gate 3 exists so this never ships as "working" again |
 | gate 3: master 200 with no variants, or media playlist with no segments | the provider returned a stub playlist; check the resolve diagnostics for the provider's own error |
 | yt-dlp stderr says `Signature solving failed … / n challenge solving failed … Ensure you have a supported JavaScript runtime and challenge solver script distribution installed` | the image lost `yt-dlp-ejs` (the `yt-dlp[default]` extra in the Dockerfile) or the `--js-runtimes node` flag (`YTDLP_JS_RUNTIMES`). Without them yt-dlp cannot solve YouTube's `n` challenge, the player response loses formats, and the failure surfaces as the bot check. Check `docker logs` for `JS runtimes: node-…` at `YTDLP_VERBOSE=1` |
 | gate 4: `502` for music videos only, message names "Sign in to confirm you're not a bot" | the egress is bot-checked. Check the lane sidecar first (`deploy/compose.prod.yml`, section "The egress this stack actually uses"): the gate's first line prints the lane control plane's state through `/v1/proxy`, and a 502 on **every** id and every client family despite a healthy sidecar means every WARP lane is flagged on that day. `bgutil-provider` being down is *not* this failure — it was measured not to change it. The next lever after that is signed-in cookies, which the owner supplies; do not add them unilaterally |
 | gate 4: audio answers `502 UPSTREAM_UNREACHABLE` "fetch failed" although the log shows `[YouTube] resolved <id> (audio) … through egress <lane>` | the URL was minted by a lane and fetched from somewhere else — googlevideo scopes those URLs to the resolving egress. `ResolvedMedia.proxy` records the lane and `fetchUpstream` sends the GET through that lane's `ProxyAgent`; if this recurs, confirm both are still wired and that the media path still uses undici's own `fetch` (see the note on the global fetch dropping headers under a dispatcher) |
-| gate 4: the lane control plane line prints a non-200 | `lane-egress` is not up or not reachable from Core: check that service's log in Dokploy (`LANE_TOKEN must be set` means the app env lost the token; a first boot takes ~4 min for WARP pool registration). A lane reading `degraded`/`quarantined` there is still perfectly usable — those probes are zen, not YouTube |
+| gate 4: the lane control plane line prints a non-200 | `cinepro-lane-egress` is not up or not reachable from Core (a 401 with a correct `CINEPRO_LANE_TOKEN` means the name resolved to another stack's sidecar — see the collision note in "The egress this stack actually uses"): check that service's log in Dokploy (`LANE_TOKEN must be set` means the app env lost the token; a first boot takes ~4 min for WARP pool registration). A lane reading `degraded`/`quarantined` there is still perfectly usable — those probes are zen, not YouTube |
 | gate 4: `503 YTDLP_PROXY_UNREACHABLE` | every `YTDLP_PROXY` entry refused the connection: the sidecar's lane ports are not listening (boot still running, or xray failed to start — see its container log). Distinct from a 502, which means the lane answered and YouTube refused |
 | gate 4: `502 YTDLP_NO_FORMAT` "Requested format is not available" on video but audio is fine | the video client list lost its muxed client — video must resolve through `android` (or `android_vr`), never through `default`/`ios`/`mweb` alone |
 | gate 4: `502 YTDLP_FAILED` / `YTDLP_NO_FORMAT` | yt-dlp's YouTube extractor is broken or every client family is blocked for this video/IP. Bump the `YTDLP_VERSION` pin in the Dockerfile to a release that works, then re-run the deploy |
@@ -518,7 +518,7 @@ for id in zAiIgYOH4Ys kJQP7kiw5Fk BmRX2g6-iQI; do                      # music
     "$(dd if=/tmp/a.bin bs=1 skip=4 count=4 2>/dev/null)"
 done
 # lane state (zen probes — not YouTube health, but it proves the sidecar is up):
-DATA=$(jq -rn --arg u 'http://lane-egress:9100/v1/status?port=all' \
+DATA=$(jq -rn --arg u 'http://cinepro-lane-egress:9100/v1/status?port=all' \
   --arg t "Bearer $(doppler secrets get CINEPRO_LANE_TOKEN -p platform -c prd --plain --silent)" \
   '{url:$u,headers:{Authorization:$t}}|@uri')
 curl -s -u "$AUTH" "$BASE/v1/proxy?data=$DATA" | jq -r '.lanes[] | "\(.port) \(.state) \(.curr_ip)"'
