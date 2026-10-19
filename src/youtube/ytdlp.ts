@@ -179,6 +179,21 @@ function contentTypeFor(format: YtDlpFormat, audio: boolean): string {
     return CONTENT_TYPE_BY_EXT[ext] ?? (audio ? 'audio/mp4' : 'video/mp4');
 }
 
+/**
+ * Full stderr for the container log, while the HTTP error keeps the short tail:
+ * a 502 body is read by a launcher, a log line is read by a human debugging
+ * YouTube, and only the second one can afford 4 KB of yt-dlp noise.
+ */
+function stderrForLog(error: unknown): string {
+    if (typeof error === 'object' && error !== null && 'stderr' in error) {
+        const stderr = (error as { stderr?: unknown }).stderr;
+        if (typeof stderr === 'string') {
+            return stderr.trim().slice(-4000);
+        }
+    }
+    return '';
+}
+
 function stderrTail(error: unknown): string {
     if (typeof error !== 'object' || error === null) {
         return String(error);
@@ -242,6 +257,12 @@ async function attemptResolve(
         });
         stdout = result.stdout;
     } catch (error) {
+        const stderr = stderrForLog(error);
+        if (stderr) {
+            console.warn(
+                `[YouTube] yt-dlp stderr for ${videoId} (clients ${clients}):\n${stderr}`
+            );
+        }
         throw new YouTubeError(
             'YTDLP_FAILED',
             `yt-dlp could not resolve ${videoId} (clients ${clients}, pot ${
