@@ -20,7 +20,8 @@ git push main
             authenticated /v1/movies/550 → ≥1 source
   → gate 3: that source's HLS chain serves a real MPEG-TS segment (0x47)
   → gate 4: the cinepro-lane-egress control plane answers 200 with four lanes, and
-            ?audio=1 for all four ids (including dQw4w9WgXcQ) answers 206 at
+            ?audio=1 for all five ids (including dQw4w9WgXcQ and RgKAFK5djSk,
+            the one the lanes cannot do) answers 206 at
             0-1048575, 0-1023, a mid-file range and bytes=0-0 (Content-Range
             `bytes 0-0/<total>`) with `ftyp` at byte 4, then 200 with the whole
             file for a plain GET; dQw4w9WgXcQ's video variant streams the same
@@ -176,6 +177,26 @@ server. That is also the endpoint's fragility: YouTube breaks the extractor
 monthly, so `yt-dlp` is **pinned** in the Dockerfile
 (`ARG YTDLP_VERSION=2026.08.19`) and gate 4 streams real bytes before a deploy
 is called green. Bump the pin only in a commit that re-runs that gate.
+
+**Signed-in cookies, and why they come first.** `src/youtube/cookies.ts`
+decodes `YTDLP_COOKIES_B64` at boot into a 0600 file (`$DATA_DIR/yt-cookies.txt`,
+`YTDLP_COOKIES_FILE` overrides the path for local runs) and every yt-dlp
+invocation passes `--cookies`. The resolver then tries the **host's own egress
+first, for one client candidate**, and only falls through to the lane rotation
+if YouTube refuses it: signed in, the URL is minted and fetched by the same
+address (no WARP hop, no 34 Mbit/s ceiling, none of the egress binding that
+made "resolve on a lane, fetch direct" impossible), and it resolves ids the
+lanes lose to the per-address lottery. Nothing logs or echoes the cookie
+content; the 502 body only ever says `cookies on|off`.
+
+Those cookies are a **session** set for a dedicated account, so they die on
+sign-out, a password change or Google's own schedule — weeks is normal. A stale
+jar is not an outage: the direct attempt starts failing with the bot check and
+the lanes take over. Refresh by writing a new Doppler value
+(`platform/prd/CINEPRO_YTDLP_COOKIES_B64`, base64 of the Netscape file, one
+line) and redeploying; the container is recreated, so the new jar is written on
+boot. CI fails the deploy if the key is empty, because unsigned this endpoint
+answers 502 for the music ids.
 
 **A cold resolve is one race, not a sweep.** `src/youtube/ytdlp.ts` iterates
 the *client* candidates outermost and races every lane in parallel for the
@@ -376,6 +397,7 @@ App secrets, in Doppler **project `platform`, config `prd`**:
 | `CINEPRO_TMDB_API_KEY` | TMDB v3 key the resolver needs; empty key = a Core that resolves nothing |
 | `CINEPRO_CORE_URL` | `https://cinepro-core.shrijit.tech` — for clients (the TV launcher) |
 | `CINEPRO_CORE_BASIC_AUTH` | `cinepro:<password>` — the Traefik basic-auth credential |
+| `CINEPRO_YTDLP_COOKIES_B64` | the dedicated account's signed-in YouTube cookies: a Netscape `cookies.txt`, base64-encoded onto one line, substituted into the app env as `YTDLP_COOKIES_B64`. This is the primary lever — with it the host's own egress resolves ids the WARP lanes lose (measured: `RgKAFK5djSk` 61.5 s/502 through the lanes, ~2.4 s direct signed-in). Base64 because a multi-line value gets truncated by `.env`/Dokploy env handling (it did: 907 bytes of a 2831-byte jar). Rotation: put fresh cookies in Doppler and redeploy — the env is read at boot, so the container must be recreated; a cookie jar that has gone stale degrades to the lane rotation rather than failing outright |
 | `CINEPRO_LANE_TOKEN` | bearer token for the `cinepro-lane-egress` sidecar's control plane (`:9100`, `status`/`rotate`/`run_cmd`). A control-plane token inside this stack, not a credential for anything outside it — but `run_cmd` is root execution in that container, so it is delivered like a secret rather than committed |
 
 How they reach the container: the deploy job reads Doppler with the read-only

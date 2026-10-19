@@ -3,6 +3,7 @@ import 'dotenv/config';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { installFetchRetry } from './fetchRetry.js';
+import { installCookies } from './youtube/cookies.js';
 import { installSourceLiveness } from './sourceLiveness.js';
 import { installTmdbResilience } from './tmdbResilience.js';
 import { registerYouTubeRoutes } from './youtube/routes.js';
@@ -12,6 +13,10 @@ import type { FastifyInstance } from 'fastify';
 
 // Must be installed before the server issues its first upstream request.
 installFetchRetry();
+// The signed-in YouTube cookie jar is materialised once at boot: the app env
+// only changes when the container is recreated, so there is nothing to watch.
+// A missing secret leaves yt-dlp resolving through the WARP lanes as before.
+installCookies();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

@@ -103,6 +103,7 @@ jobs:
           TMDB=$(jq -r '.CINEPRO_TMDB_API_KEY // empty' /tmp/doppler.json)
           AUTH=$(jq -r '.CINEPRO_CORE_BASIC_AUTH // empty' /tmp/doppler.json)
           LANE=$(jq -r '.CINEPRO_LANE_TOKEN // empty' /tmp/doppler.json)
+          COOKIES=$(jq -r '.CINEPRO_YTDLP_COOKIES_B64 // empty' /tmp/doppler.json)
           if [ -z "$TMDB" ]; then
             echo "::error::CINEPRO_TMDB_API_KEY is empty in Doppler platform/prd — refusing to deploy a Core that cannot resolve anything"
             exit 1
@@ -115,13 +116,19 @@ jobs:
             echo "::error::CINEPRO_LANE_TOKEN is empty in Doppler platform/prd — the lane-egress sidecar refuses to boot without it (LANE_TOKEN required)"
             exit 1
           fi
+          if [ -z "$COOKIES" ]; then
+            echo "::error::CINEPRO_YTDLP_COOKIES_B64 is empty in Doppler platform/prd — unsigned, YouTube bot-checks this host's egress and the music ids answer 502"
+            exit 1
+          fi
           echo "::add-mask::$TMDB"
           echo "::add-mask::$AUTH"
           echo "::add-mask::$LANE"
+          echo "::add-mask::$COOKIES"
           {
             echo "TMDB_API_KEY=$TMDB"
             echo "BASIC_AUTH=$AUTH"
             echo "LANE_TOKEN=$LANE"
+            echo "YTDLP_COOKIES_B64=$COOKIES"
           } >> "$GITHUB_ENV"
           rm -f /tmp/doppler.json
           echo "loaded ${{ github.repository }} app secrets from Doppler platform/prd"
@@ -177,11 +184,11 @@ jobs:
           set -euo pipefail
           # Dokploy's provider sync can clear an app's env block, so it is
           # re-asserted from deploy/app.env on every deploy. No secret is in
-          # that file: __TMDB_API_KEY__ and __LANE_TOKEN__ are substituted from
-          # Doppler here.
+          # that file: __TMDB_API_KEY__, __LANE_TOKEN__ and
+          # __YTDLP_COOKIES_B64__ are substituted from Doppler here.
           jq -n --rawfile env deploy/app.env --arg key "$TMDB_API_KEY" \
-            --arg lane "$LANE_TOKEN" \
-            '$env | gsub("__TMDB_API_KEY__"; $key) | gsub("__LANE_TOKEN__"; $lane)' \
+            --arg lane "$LANE_TOKEN" --arg cookies "$YTDLP_COOKIES_B64" \
+            '$env | gsub("__TMDB_API_KEY__"; $key) | gsub("__LANE_TOKEN__"; $lane) | gsub("__YTDLP_COOKIES_B64__"; $cookies)' \
             --raw-output > /tmp/app.env
           jq -nc --arg id "$COMPOSE_ID" --rawfile env /tmp/app.env \
             '{composeId: $id, env: $env, createEnvFile: true}' > /tmp/payload.json
@@ -356,11 +363,11 @@ jobs:
             # Latency is part of the contract: a cold resolve that sweeps every
             # lane × client used to answer the first byte in 14-35 s, and the TV
             # shows that as a hang.
-            if awk -v t="$ttfb" 'BEGIN { exit !(t > 20) }'; then
-              echo "::error::$id$suffix: first byte after ${ttfb}s — a cold resolve must stay under 20 s"
+            if awk -v t="$ttfb" 'BEGIN { exit !(t > 12) }'; then
+              echo "::error::$id$suffix: first byte after ${ttfb}s — a cold resolve must stay under 12 s (measured with cookies: ~2.4-4 s)"
               return 1
             fi
-            if awk -v t="$ttfb" 'BEGIN { exit !(t > 10) }'; then
+            if awk -v t="$ttfb" 'BEGIN { exit !(t > 6) }'; then
               echo "::warning::$id$suffix: first byte after ${ttfb}s — cold resolve is slow"
             fi
             [ "$size" = "1048576" ] || { echo "::error::$id$suffix: expected 1048576 bytes, got $size"; return 1; }
@@ -423,7 +430,10 @@ jobs:
           # says otherwise.
           echo "video dQw4w9WgXcQ"
           check_stream dQw4w9WgXcQ '' '' || fail=1
-          for id in dQw4w9WgXcQ kJQP7kiw5Fk zAiIgYOH4Ys BmRX2g6-iQI; do
+          # RgKAFK5djSk is the id the lanes cannot do: it burned 61.5 s and
+          # answered 502 through the WARP rotation on 2e549b7. With the signed-in
+          # cookie jar the direct attempt resolves it in ~2.4 s.
+          for id in dQw4w9WgXcQ kJQP7kiw5Fk RgKAFK5djSk zAiIgYOH4Ys BmRX2g6-iQI; do
             echo "audio $id"
             check_stream "$id" '?audio=1' ftyp || fail=1
           done

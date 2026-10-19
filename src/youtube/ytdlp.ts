@@ -17,6 +17,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { cookieFile } from './cookies.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -267,6 +268,7 @@ async function attemptResolve(
     proxy: string,
     signal?: AbortSignal
 ): Promise<ResolvedMedia> {
+    const jar = cookieFile();
     const args = [
         // Deliberately no `--no-warnings`: the PoToken plugin's warnings
         // ("failed to fetch a token") are the difference between a mystery 502
@@ -274,6 +276,10 @@ async function attemptResolve(
         ...(VERBOSE ? ['-v'] : []),
         ...(proxy ? ['--proxy', proxy] : []),
         ...(JS_RUNTIMES ? ['--js-runtimes', JS_RUNTIMES] : []),
+        // A signed-in session is what stops YouTube refusing this host at all;
+        // without it the request is an anonymous, bot-checkable one. The path
+        // never appears in a body or a log — only the fact that one is in use.
+        ...(jar ? ['--cookies', jar] : []),
         '--no-playlist',
         '--no-progress',
         '--no-cache-dir',
@@ -311,7 +317,9 @@ async function attemptResolve(
             'YTDLP_FAILED',
             `yt-dlp could not resolve ${videoId} (clients ${clients}, pot ${
                 POT_PROVIDER_URL || 'off'
-            }${proxy ? `, egress ${proxy}` : ''}): ${stderrTail(error)}`,
+            }, cookies ${jar ? 'on' : 'off'}${
+                proxy ? `, egress ${proxy}` : ''
+            }): ${stderrTail(error)}`,
             502
         );
     }
@@ -462,6 +470,30 @@ async function resolveUncached(
         `yt-dlp could not resolve ${videoId}`,
         502
     );
+    // With a signed-in cookie jar the host's own egress stops being refused,
+    // so the direct attempt is both faster (no tunnel hop) and free of the
+    // egress-binding trap (the URL is minted and fetched by the same address).
+    // It gets one candidate; if YouTube still refuses, the lane rotation below
+    // runs exactly as it did before cookies existed.
+    if (cookieFile() && PROXIES.length > 0) {
+        const clients = orderedClients(clientFallbacks, variant)[0];
+        try {
+            const media = await attemptResolve(videoId, audio, clients, '');
+            lastGoodClients[variant] = clients;
+            console.log(
+                `[YouTube] resolved ${videoId} (${variant}) via client ${clients} directly, signed in`
+            );
+            return media;
+        } catch (error) {
+            lastError = error;
+            console.warn(
+                `[YouTube] direct (signed-in) resolve of ${videoId} with clients ${clients} failed, falling back to the lanes: ${
+                    error instanceof Error ? error.message : String(error)
+                }`
+            );
+        }
+    }
+
     // Client-major, egress-parallel: the common case is one client that works,
     // so a cold id costs one race instead of one yt-dlp run per lane per
     // candidate (measured before this: 14 s and 35 s TTFB on cold ids, against
