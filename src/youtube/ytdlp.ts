@@ -268,7 +268,13 @@ async function attemptResolve(
     proxy: string,
     signal?: AbortSignal
 ): Promise<ResolvedMedia> {
-    const jar = cookieFile();
+    // Cookies belong to the direct path only. A lane mints and fetches its own
+    // attested URL, and signing in *through* a lane put the account's identity
+    // behind four different addresses at once — measured: a burst of signed-in
+    // resolves made every URL (direct and laned) answer an empty-body 403 from
+    // googlevideo for the next minute or so. Anonymous lane requests are the
+    // behaviour that worked before cookies existed.
+    const jar = proxy ? null : cookieFile();
     const args = [
         // Deliberately no `--no-warnings`: the PoToken plugin's warnings
         // ("failed to fetch a token") are the difference between a mystery 502

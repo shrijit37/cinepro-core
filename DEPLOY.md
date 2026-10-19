@@ -189,6 +189,13 @@ made "resolve on a lane, fetch direct" impossible), and it resolves ids the
 lanes lose to the per-address lottery. Nothing logs or echoes the cookie
 content; the 502 body only ever says `cookies on|off`.
 
+The jar is used **only on the direct path**. A lane mints and fetches its own
+attested URL and needs no account, and signing in through four lanes put one
+account behind four addresses at once: measured, a burst of signed-in resolves
+made every URL — direct and laned alike — answer an empty-body 403 from
+googlevideo for about a minute, while anonymous lane URLs kept working. So the
+fallback is anonymous.
+
 Those cookies are a **session** set for a dedicated account, so they die on
 sign-out, a password change or Google's own schedule — weeks is normal. A stale
 jar is not an outage: the direct attempt starts failing with the bot check and
