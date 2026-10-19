@@ -27,9 +27,16 @@ services:
         aliases:
           - bgutil-provider
 
-  # lane-egress: one Cloudflare WARP egress per lane, each lane an HTTP CONNECT
-  # proxy on :800N inside this container, plus a control plane on :9100. Core
-  # reaches lane N as http://lane-egress:800N through YTDLP_PROXY.
+  # cinepro-lane-egress: one Cloudflare WARP egress per lane, each lane an HTTP
+  # CONNECT proxy on :800N inside this container, plus a control plane on :9100.
+  # Core reaches lane N as http://cinepro-lane-egress:800N through YTDLP_PROXY.
+  #
+  # The service name is deliberately not `lane-egress`: the ccMesh stack runs
+  # the same sidecar under that name on this host, and while both were on
+  # dokploy-network Docker's DNS answered `lane-egress` with *both* containers.
+  # Core then streamed through another stack's sidecar (its control plane
+  # answered 401 for this stack's token) and this stack's own lanes carried
+  # nothing. A unique service name makes the target unambiguous.
   #
   # WHY THIS EXISTS. This host's own egress (130.210.29.215, OCI ap-mumbai-1,
   # AS31898) is bot-checked by YouTube for every yt-dlp client family, so
@@ -48,7 +55,7 @@ services:
   # boot/rotation probes are opencode *zen* surfaces (PROBE_SURFACES below), so
   # a lane can read degraded there while serving YouTube fine, and vice versa.
   # The only authoritative test is a real resolve through the lane.
-  lane-egress:
+  cinepro-lane-egress:
     image: ghcr.io/shrijit37/meshcode-lane-egress@sha256:37c6dbd793a2e2891262ab6fb3897b72556447d75f984ab0c54f6d68b49ec8d1
     environment:
       # Bearer token for the :9100 control plane (status / rotate / run_cmd).
@@ -74,7 +81,7 @@ services:
     networks:
       dokploy-network:
         aliases:
-          - lane-egress
+          - cinepro-lane-egress
 
 volumes:
   lane-state:

@@ -318,12 +318,14 @@ jobs:
 
           # Lane sidecar reachability — diagnostic only. The lane control plane
           # speaks plain HTTP on dokploy-network, so Core's /v1/proxy can reach
-          # it, which proves the service is up and that `lane-egress` resolves
-          # from inside the Core container. It does NOT prove YouTube works
+          # it, which proves the service is up and that `cinepro-lane-egress`
+          # resolves from inside the Core container (it is not `lane-egress`:
+          # the ccMesh stack runs the same sidecar under that name, and shared
+          # DNS sent Core's resolves through that other stack). It does NOT prove YouTube works
           # through a lane: lane-ctl's probes are opencode zen surfaces, not
           # YouTube health (`deploy/compose.prod.yml`). The loop below is the
           # authority; this line just says which of the two broke.
-          data=$(jq -rn --arg u 'http://lane-egress:9100/v1/status?port=all' \
+          data=$(jq -rn --arg u 'http://cinepro-lane-egress:9100/v1/status?port=all' \
             --arg t "Bearer $LANE_TOKEN" '{url:$u,headers:{Authorization:$t}}|@uri')
           lane_code=$(curl -s -o lane.json -w '%{http_code}' --max-time 30 \
             -u "$BASIC_AUTH" "$APP_URL/v1/proxy?data=$data" || true)

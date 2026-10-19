@@ -39,7 +39,7 @@ hook added; `src/` is otherwise upstream's.
 | Dokploy compose app | `cinepro-core`, `composeId mopcs_qIGlzM4iMd-s-M3`, appName `cinepro-rqornd` |
 | container | `cinepro-rqornd-cinepro-core-1`, image = the pinned `ghcr.io/shrijit37/cinepro-core:<sha>` |
 | second service | `bgutil-provider` — upstream `brainicism/bgutil-ytdlp-pot-provider:2.0.2`, mints the YouTube PoTokens `yt-dlp` needs; no published port, reachable only as `http://bgutil-provider:4416` on `dokploy-network` |
-| third service | `lane-egress` — `ghcr.io/shrijit37/meshcode-lane-egress`, digest-pinned; WARP egress lanes on `:8001`–`:8004` that `YTDLP_PROXY` resolves YouTube through
+| third service | `cinepro-lane-egress` — `ghcr.io/shrijit37/meshcode-lane-egress`, digest-pinned; WARP egress lanes on `:8001`–`:8004` that `YTDLP_PROXY` resolves YouTube through
 (and that the media byte fetch leaves through), plus a token-protected control plane on `:9100`. No published ports. See "The egress this stack actually uses" |
 | compose file | owned by the API; `deploy/compose.prod.yml` in this repo is the source of truth, CI substitutes the image token into it |
 | domain | `cinepro-core.shrijit.tech` → service `cinepro-core`, port 3210, Let's Encrypt |
@@ -270,17 +270,18 @@ error keeps the short tail — a launcher reads that one).
 
 ### The egress this stack actually uses: `lane-egress` (WARP)
 
-`deploy/compose.prod.yml` runs a third service, `lane-egress`, and
+`deploy/compose.prod.yml` runs a third service, `cinepro-lane-egress`, and
 `YTDLP_PROXY` points at it:
 
 ```
-lane-egress   ghcr.io/shrijit37/meshcode-lane-egress@sha256:37c6dbd7…   (digest-pinned)
+cinepro-lane-egress  ghcr.io/shrijit37/meshcode-lane-egress@sha256:37c6dbd7…   (digest-pinned)
   LANE_MODE=warp, LANES=8001,8002,8003,8004, WARP_POOL_SIZE=8,
   PROBE_SURFACES=chat
   one HTTP CONNECT proxy per lane on :8001–:8004, control plane on :9100
-  no published ports; reachable only on dokploy-network, as `lane-egress`
+  no published ports; reachable only on dokploy-network, as
+  `cinepro-lane-egress` — NOT `lane-egress` (see the collision note below)
 
-cinepro-core  YTDLP_PROXY=http://lane-egress:8001;http://lane-egress:8002;http://lane-egress:8003;http://lane-egress:8004
+cinepro-core  YTDLP_PROXY=http://cinepro-lane-egress:8001;…:8002;…:8003;…:8004
               (the `;` list yt-dlp rotates per client-per-egress)
 ```
 
@@ -302,6 +303,16 @@ the digest used here and the ccMesh stack's digest were confirmed to exist in
 GHCR by an anonymous `manifests/` fetch before pinning. Rebuild it deliberately
 (`gh workflow run lane-egress-image.yml` in `shrijit37/meshcode`) and update
 this digest.
+
+**The service name matters.** It is `cinepro-lane-egress`, not `lane-egress`:
+the ccMesh stack runs the same sidecar under that name on this host, and while
+both containers answered to `lane-egress` on `dokploy-network`, Docker's DNS
+returned both addresses and Core's resolves went to the *other* stack's
+sidecar — visible as `401 {"error":"unauthorized","message":"missing or
+invalid bearer token"}` from `:9100` while this stack's token was correct, and
+as this stack's own lanes carrying no traffic at all. Never reintroduce the
+shared name; a lane that "works" but belongs to another stack breaks the day
+that stack is redeployed.
 
 **Those lane probes are NOT YouTube health.** `lane-ctl`'s boot and rotation
 probes are opencode *zen* surfaces (`PROBE_SURFACES`, `ZEN_PROBE_TIMEOUT` —
