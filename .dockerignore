@@ -1,0 +1,14 @@
+# Keep the build context to what the Dockerfile actually needs. Without this,
+# `COPY . .` drags in .git, node_modules and dist from whatever working copy
+# invoked the build, and the context grows with every local install.
+.git
+node_modules
+dist
+.env
+.github
+deploy
+DEPLOY.md
+compose.yml
+render.yaml
+vercel.json
+wrangler.json

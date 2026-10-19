@@ -31,6 +31,7 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -44,6 +45,7 @@ jobs:
   build:
     needs: [test]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -62,6 +64,13 @@ jobs:
           # Both platforms: the Dokploy host is linux/arm64.
           platforms: linux/amd64,linux/arm64
           push: true
+          # Attestations off (as upstream's own release workflow does): they add
+          # manifest pushes this deploy never reads, and a GHCR hiccup on them
+          # stalls the whole build instead of failing it.
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=cinepro-core
+          cache-to: type=gha,mode=max,scope=cinepro-core
           # APP_VERSION is what /v1/health reports as `version`; the gate below
           # asserts it, so a stale container can never pass as this build.
           build-args: |
@@ -74,6 +83,7 @@ jobs:
   deploy:
     needs: [build]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
