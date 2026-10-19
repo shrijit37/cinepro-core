@@ -185,6 +185,13 @@ async function openUpstream(
     signal: AbortSignal
 ): Promise<UpstreamFetch> {
     const response = await fetchUpstream(media, range, signal);
+    if (media.proxy === null) {
+        if (EXPIRED_STATUSES.has(response.status)) {
+            noteDirectRefusal();
+        } else if (response.status < 400) {
+            noteDirectSuccess();
+        }
+    }
     if (!EXPIRED_STATUSES.has(response.status)) {
         return { response, media };
     }
@@ -358,13 +365,6 @@ async function handleYouTube(
         : cookieFile()
           ? 'cookies-direct'
           : 'direct';
-    if (!resolved.proxy && cookieFile()) {
-        if (response.status >= 400) {
-            noteDirectRefusal();
-        } else {
-            noteDirectSuccess();
-        }
-    }
     console.log(
         `[YouTube] ${videoId}${audio ? '?audio=1' : ''} -> ${response.status} via ${via} in ${(
             (Date.now() - startedAt) /

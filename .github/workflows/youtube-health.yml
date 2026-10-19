@@ -7,9 +7,12 @@ name: youtube-health
 # asks production for a real audio byte-range every six hours and goes red the
 # moment it stops answering 206 — a red badge in this repo is the alert.
 #
-# It resolves the music id that needs the signed-in session (kJQP7kiw5Fk) with
-# a 1 KiB range, which is the cheapest request that still proves the whole
-# chain: cookie jar -> yt-dlp resolve -> media fetch -> a real MP4 `ftyp`.
+# It resolves music ids with a 1 KiB range, which is the cheapest request that
+# still proves the whole chain: yt-dlp resolve -> media fetch -> a real MP4
+# `ftyp`. It cannot tell which path answered, and does not try: the endpoint
+# logs one line per resolve (`[YouTube] <id> -> 206 via cookies-direct|lane …`),
+# and a refused signed-in URL falls back to a lane, so a rotten jar shows up in
+# those lines before it shows up as a red probe.
 
 on:
     schedule:
@@ -59,9 +62,9 @@ jobs:
                   }
 
                   fail=0
-                  # kJQP7kiw5Fk is the id the WARP lanes cannot resolve, so it is
-                  # the one that proves the signed-in path is actually in use; the
-                  # second id proves the endpoint still serves an ordinary one.
+                  # kJQP7kiw5Fk is the id that bot-checks hardest for this host's
+                  # own egress; zAiIgYOH4Ys is an ordinary track. Both are what
+                  # the TV's music screen asks for.
                   check kJQP7kiw5Fk || fail=1
                   check zAiIgYOH4Ys || fail=1
                   rm -f probe.bin

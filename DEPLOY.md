@@ -189,6 +189,13 @@ made "resolve on a lane, fetch direct" impossible), and it resolves ids the
 lanes lose to the per-address lottery. Nothing logs or echoes the cookie
 content; the 502 body only ever says `cookies on|off`.
 
+A refused signed-in URL is retried on the lanes, never direct again, and while
+refusals are happening the direct attempt is skipped for ten minutes (one good
+direct fetch clears it) so the fallback does not pay for it on every request.
+The endpoint logs one line per resolve — `[YouTube] <id> -> 206 via
+cookies-direct in 2.3 s` or `via lane cinepro-lane-egress:8003 in 8.1 s` — which
+is how to tell a working jar from a dead one that the lanes are covering for.
+
 The jar is used **only on the direct path**. A lane mints and fetches its own
 attested URL and needs no account, and signing in through four lanes put one
 account behind four addresses at once: measured, a burst of signed-in resolves
