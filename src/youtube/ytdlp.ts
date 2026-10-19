@@ -377,6 +377,30 @@ function isProxyFailure(error: unknown): boolean {
     return PROXY_UNREACHABLE_RE.test(message);
 }
 
+/**
+ * googlevideo refuses a signed-in URL's bytes with an empty-body 403 in bursts,
+ * and then keeps doing so for a while; each refused direct attempt costs a
+ * resolve plus a fetch before the lanes can serve the request. Measured
+ * 2026-10-19: five ids in a row resolved direct in 2-3 s and then 403'd, while
+ * lane URLs for the same ids streamed immediately. The breaker keeps the
+ * signed-in attempt out of the way for a while after such a refusal, and a
+ * single successful direct fetch puts it straight back.
+ */
+let directRefusedAt = 0;
+const DIRECT_REFUSAL_COOLDOWN_MS = 10 * 60 * 1000;
+
+export function noteDirectRefusal(): void {
+    directRefusedAt = Date.now();
+}
+
+export function noteDirectSuccess(): void {
+    directRefusedAt = 0;
+}
+
+function directAllowed(): boolean {
+    return Date.now() - directRefusedAt > DIRECT_REFUSAL_COOLDOWN_MS;
+}
+
 type EgressOutcome =
     | { ok: ResolvedMedia }
     | { error: unknown; unreachable: number; total: number };
@@ -482,7 +506,7 @@ async function resolveUncached(
     // egress-binding trap (the URL is minted and fetched by the same address).
     // It gets one candidate; if YouTube still refuses, the lane rotation below
     // runs exactly as it did before cookies existed.
-    if (!laned && cookieFile() && PROXIES.length > 0) {
+    if (!laned && directAllowed() && cookieFile() && PROXIES.length > 0) {
         const clients = orderedClients(clientFallbacks, variant)[0];
         try {
             const media = await attemptResolve(videoId, audio, clients, '');

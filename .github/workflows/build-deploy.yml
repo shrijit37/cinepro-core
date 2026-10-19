@@ -432,6 +432,16 @@ jobs:
           # gated here. A client family YouTube decides to bot-check turns these
           # into 502s, which is a shipped-as-green regression until this gate
           # says otherwise.
+          # Warm the resolver first: yt-dlp's first start in a fresh container
+          # pays the Python + JS-runtime cold start on top of a resolve (measured
+          # 15.4 s against 5.8-7.2 s for the next id), and the TV panel prewarms
+          # its next tracks, so the steady-state number is the one users see and
+          # the one asserted below. The warmup id is not one of the asserted ids,
+          # so every assertion below is still a cold resolve.
+          echo "warmup"
+          curl -s -o /dev/null --max-time 60 -u "$BASIC_AUTH" \
+            -H 'Range: bytes=0-0' "$APP_URL/v1/youtube/fJ9rUzIMcZQ?audio=1" || true
+
           echo "video dQw4w9WgXcQ"
           check_stream dQw4w9WgXcQ '' '' || fail=1
           # RgKAFK5djSk is the id the lanes cannot do: it burned 61.5 s and

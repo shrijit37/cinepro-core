@@ -13,7 +13,13 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { fetch as undiciFetch, ProxyAgent } from 'undici';
 import { retryTransient } from '../fetchRetry.js';
 import { cookieFile } from './cookies.js';
-import { resolveMedia, YouTubeError, type ResolvedMedia } from './ytdlp.js';
+import {
+    noteDirectRefusal,
+    noteDirectSuccess,
+    resolveMedia,
+    YouTubeError,
+    type ResolvedMedia
+} from './ytdlp.js';
 
 /** A YouTube video id is exactly 11 URL-safe base64 characters. */
 const VIDEO_ID_PATTERN = /^[A-Za-z0-9_-]{11}$/;
@@ -352,6 +358,13 @@ async function handleYouTube(
         : cookieFile()
           ? 'cookies-direct'
           : 'direct';
+    if (!resolved.proxy && cookieFile()) {
+        if (response.status >= 400) {
+            noteDirectRefusal();
+        } else {
+            noteDirectSuccess();
+        }
+    }
     console.log(
         `[YouTube] ${videoId}${audio ? '?audio=1' : ''} -> ${response.status} via ${via} in ${(
             (Date.now() - startedAt) /
