@@ -27,6 +27,55 @@ services:
         aliases:
           - bgutil-provider
 
+  # lane-egress: one Cloudflare WARP egress per lane, each lane an HTTP CONNECT
+  # proxy on :800N inside this container, plus a control plane on :9100. Core
+  # reaches lane N as http://lane-egress:800N through YTDLP_PROXY.
+  #
+  # WHY THIS EXISTS. This host's own egress (130.210.29.215, OCI ap-mumbai-1,
+  # AS31898) is bot-checked by YouTube for every yt-dlp client family, so
+  # /v1/youtube/*?audio=1 answered 502 for the music ids while the same clients
+  # resolved the same ids from a residential line and from WARP. A PoToken was
+  # measured not to be the lever (the provider only serves the webpo clients,
+  # which this IP also bot-checks): the failing axis is egress reputation.
+  #
+  # Pinned by digest, like the ccMesh stack pins it: a tag would let an upstream
+  # rebuild swap the sidecar under a Core-only deploy and force a lane
+  # re-provision. Source is shrijit37/meshcode container/lane-egress — rebuild
+  # deliberately, then update this digest. Warp mode is userspace (xray →
+  # WireGuard), so no cap_add, no /dev/net/tun, no ip_forward.
+  #
+  # NEVER read the control plane's lane state as YouTube health: lane_ctl's
+  # boot/rotation probes are opencode *zen* surfaces (PROBE_SURFACES below), so
+  # a lane can read degraded there while serving YouTube fine, and vice versa.
+  # The only authoritative test is a real resolve through the lane.
+  lane-egress:
+    image: ghcr.io/shrijit37/meshcode-lane-egress@sha256:37c6dbd793a2e2891262ab6fb3897b72556447d75f984ab0c54f6d68b49ec8d1
+    environment:
+      # Bearer token for the :9100 control plane (status / rotate / run_cmd).
+      # Baked into this stack's .env by CI from Doppler platform/prd
+      # CINEPRO_LANE_TOKEN — it authenticates inside this stack only and is not
+      # a credential for anything outside it. No published port either: the
+      # sidecar is reachable on dokploy-network only.
+      LANE_TOKEN: ${LANE_TOKEN:?LANE_TOKEN must be set in the compose env}
+      LANE_MODE: warp
+      # Two lanes, four WARP accounts: boot brings up max(pool, lanes*2).
+      LANES: "8001,8002"
+      WARP_POOL_SIZE: "4"
+      PROBE_SURFACES: "chat"
+      ZEN_PROBE_TIMEOUT: "12"
+    restart: unless-stopped
+    volumes:
+      # Pool + per-lane account pointers: without it every recreate registers a
+      # fresh set of WARP accounts (paced, and wasteful).
+      - lane-state:/var/lib/lane-egress
+    networks:
+      dokploy-network:
+        aliases:
+          - lane-egress
+
+volumes:
+  lane-state:
+
 networks:
   dokploy-network:
     external: true

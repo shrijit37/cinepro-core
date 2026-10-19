@@ -3,6 +3,8 @@ import 'dotenv/config';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { installFetchRetry } from './fetchRetry.js';
+import { installSourceLiveness } from './sourceLiveness.js';
+import { installTmdbResilience } from './tmdbResilience.js';
 import { registerYouTubeRoutes } from './youtube/routes.js';
 import { knownThirdPartyProxies } from './thirdPartyProxies.js';
 import { streamPatterns } from './streamPatterns.js';
@@ -93,6 +95,23 @@ async function main() {
     // server; the framework field is stable and this is the only coupling.
     const { app } = server as unknown as { app: FastifyInstance };
     registerYouTubeRoutes(app);
+
+    // Turns a TMDB transport failure that outlasted the fetch retries into a
+    // 503 UPSTREAM_UNAVAILABLE instead of the framework's generic 500, so the
+    // launcher retries a request that a moment later works. The service is
+    // private on OMSSServer, hence the cast.
+    const serverInternals = server as unknown as { tmdbService?: object };
+    const guarded = installTmdbResilience(serverInternals.tmdbService ?? {});
+    if (guarded === 0) {
+        console.warn(
+            '[TmdbResilience] no TMDB methods were guarded — the framework changed shape; the resolve path answers 500 on a TMDB flap again'
+        );
+    }
+
+    // Wraps SourceService's two resolve entry points so a source whose URL is
+    // already dead is dropped before the response (or the 1-hour cache) carries
+    // it to the player.
+    installSourceLiveness();
 
     await server.start();
 

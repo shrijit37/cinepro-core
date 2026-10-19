@@ -102,6 +102,7 @@ jobs:
           doppler secrets download --no-file --format json --silent > /tmp/doppler.json
           TMDB=$(jq -r '.CINEPRO_TMDB_API_KEY // empty' /tmp/doppler.json)
           AUTH=$(jq -r '.CINEPRO_CORE_BASIC_AUTH // empty' /tmp/doppler.json)
+          LANE=$(jq -r '.CINEPRO_LANE_TOKEN // empty' /tmp/doppler.json)
           if [ -z "$TMDB" ]; then
             echo "::error::CINEPRO_TMDB_API_KEY is empty in Doppler platform/prd — refusing to deploy a Core that cannot resolve anything"
             exit 1
@@ -110,11 +111,17 @@ jobs:
             echo "::error::CINEPRO_CORE_BASIC_AUTH is empty in Doppler platform/prd — the auth gate cannot run"
             exit 1
           fi
+          if [ -z "$LANE" ]; then
+            echo "::error::CINEPRO_LANE_TOKEN is empty in Doppler platform/prd — the lane-egress sidecar refuses to boot without it (LANE_TOKEN required)"
+            exit 1
+          fi
           echo "::add-mask::$TMDB"
           echo "::add-mask::$AUTH"
+          echo "::add-mask::$LANE"
           {
             echo "TMDB_API_KEY=$TMDB"
             echo "BASIC_AUTH=$AUTH"
+            echo "LANE_TOKEN=$LANE"
           } >> "$GITHUB_ENV"
           rm -f /tmp/doppler.json
           echo "loaded ${{ github.repository }} app secrets from Doppler platform/prd"
@@ -170,9 +177,12 @@ jobs:
           set -euo pipefail
           # Dokploy's provider sync can clear an app's env block, so it is
           # re-asserted from deploy/app.env on every deploy. No secret is in
-          # that file: __TMDB_API_KEY__ is substituted from Doppler here.
+          # that file: __TMDB_API_KEY__ and __LANE_TOKEN__ are substituted from
+          # Doppler here.
           jq -n --rawfile env deploy/app.env --arg key "$TMDB_API_KEY" \
-            '$env | gsub("__TMDB_API_KEY__"; $key)' --raw-output > /tmp/app.env
+            --arg lane "$LANE_TOKEN" \
+            '$env | gsub("__TMDB_API_KEY__"; $key) | gsub("__LANE_TOKEN__"; $lane)' \
+            --raw-output > /tmp/app.env
           jq -nc --arg id "$COMPOSE_ID" --rawfile env /tmp/app.env \
             '{composeId: $id, env: $env, createEnvFile: true}' > /tmp/payload.json
           curl -fsS -X POST "$DOKPLOY_URL/api/compose.saveEnvironment" \
@@ -295,9 +305,37 @@ jobs:
           # range). So Core must mint the URL with yt-dlp AND stream the bytes
           # itself, honouring Range. This gate is the only thing standing
           # between a yt-dlp regression and a silent "no playback".
+          #
+          # It is also the egress gate. When the resolver's own egress IP is
+          # bot-checked by YouTube, every client family answers "Sign in to
+          # confirm you're not a bot" and the music ids below answer 502 —
+          # which is how this whole endpoint came to be broken while a deploy
+          # was green. A run of this step is therefore the acceptance test for
+          # "YouTube audio works", not just for "the container is up".
           code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$APP_URL/v1/youtube/dQw4w9WgXcQ")
           echo "anonymous /v1/youtube/dQw4w9WgXcQ -> $code"
           [ "$code" = "401" ] || { echo "::error::anonymous YouTube endpoint returned $code, expected 401"; exit 1; }
+
+          # Lane sidecar reachability — diagnostic only. The lane control plane
+          # speaks plain HTTP on dokploy-network, so Core's /v1/proxy can reach
+          # it, which proves the service is up and that `lane-egress` resolves
+          # from inside the Core container. It does NOT prove YouTube works
+          # through a lane: lane-ctl's probes are opencode zen surfaces, not
+          # YouTube health (`deploy/compose.prod.yml`). The loop below is the
+          # authority; this line just says which of the two broke.
+          data=$(jq -rn --arg u 'http://lane-egress:9100/v1/status?port=all' \
+            --arg t "Bearer $LANE_TOKEN" '{url:$u,headers:{Authorization:$t}}|@uri')
+          lane_code=$(curl -s -o lane.json -w '%{http_code}' --max-time 30 \
+            -u "$BASIC_AUTH" "$APP_URL/v1/proxy?data=$data" || true)
+          echo "lane control plane via /v1/proxy -> HTTP $lane_code"
+          if [ "$lane_code" = "200" ]; then
+            jq -r '(.lanes // [])[] | "  lane \(.port) state=\(.state) ip=\(.curr_ip // "?")"' lane.json || true
+          else
+            head -c 300 lane.json || true
+            echo
+          fi
+
+          body() { printf '%s' "$(head -c 400 "$1" 2>/dev/null || true)" | tr -d '\r'; }
 
           check_video() {
             local id=$1 code size total half end brand
@@ -306,9 +344,16 @@ jobs:
             size=$(wc -c < yt_first.bin)
             total=$(grep -i '^content-range:' yt_headers.txt | tr -d '\r' | sed -E 's#.*/##')
             echo "  $id  range 0-1048575 -> HTTP $code, $size bytes, total ${total:-?}"
-            [ "$code" = "206" ] || { echo "::error::$id: expected 206, got $code"; return 1; }
+            [ "$code" = "206" ] || { echo "::error::$id: expected 206, got $code: $(body yt_first.bin)"; return 1; }
             [ "$size" = "1048576" ] || { echo "::error::$id: expected 1048576 bytes, got $size"; return 1; }
             case "$total" in ''|*[!0-9]*) echo "::error::$id: no usable Content-Range total"; return 1 ;; esac
+
+            code=$(curl -s -o yt_small.bin -w '%{http_code}' --max-time 180 \
+              -u "$BASIC_AUTH" -H 'Range: bytes=0-1023' "$APP_URL/v1/youtube/$id")
+            size=$(wc -c < yt_small.bin)
+            echo "  $id  range 0-1023 -> HTTP $code, $size bytes"
+            [ "$code" = "206" ] || { echo "::error::$id: head range expected 206, got $code: $(body yt_small.bin)"; return 1; }
+            [ "$size" = "1024" ] || { echo "::error::$id: head range returned $size bytes, expected 1024"; return 1; }
 
             half=$(( total / 2 ))
             end=$(( half + 1023 ))
@@ -316,15 +361,19 @@ jobs:
               -u "$BASIC_AUTH" -H "Range: bytes=$half-$end" "$APP_URL/v1/youtube/$id")
             size=$(wc -c < yt_mid.bin)
             echo "  $id  range $half-$end -> HTTP $code, $size bytes"
-            [ "$code" = "206" ] || { echo "::error::$id: mid-file range returned $code"; return 1; }
+            [ "$code" = "206" ] || { echo "::error::$id: mid-file range returned $code: $(body yt_mid.bin)"; return 1; }
             [ "$size" = "1024" ] || { echo "::error::$id: mid-file range returned $size bytes, expected 1024"; return 1; }
 
+            # The audio variant is the one that breaks: `bestaudio[ext=m4a]` is
+            # only offered by some client families, and a flagged egress loses
+            # them all. A 206 whose byte 4 is not `ftyp` is not an MP4/AAC
+            # track and the TV plays it badly, so the brand is asserted too.
             code=$(curl -s -o yt_audio.bin -w '%{http_code}' --max-time 180 \
               -u "$BASIC_AUTH" -H 'Range: bytes=0-1023' "$APP_URL/v1/youtube/$id?audio=1")
             size=$(wc -c < yt_audio.bin)
             brand=$(dd if=yt_audio.bin bs=1 skip=4 count=4 2>/dev/null || true)
             echo "  $id  audio -> HTTP $code, $size bytes, brand '$brand'"
-            [ "$code" = "206" ] || { echo "::error::$id audio: expected 206, got $code"; return 1; }
+            [ "$code" = "206" ] || { echo "::error::$id audio: expected 206, got $code: $(body yt_audio.bin)"; return 1; }
             [ "$size" = "1024" ] || { echo "::error::$id audio: expected 1024 bytes, got $size"; return 1; }
             [ "$brand" = "ftyp" ] || { echo "::error::$id audio: no ftyp box at byte 4 (got '$brand') — not MP4"; return 1; }
             return 0
