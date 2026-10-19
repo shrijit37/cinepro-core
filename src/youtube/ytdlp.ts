@@ -57,6 +57,14 @@ const POT_PROVIDER_URL =
     process.env.YTDLP_POT_URL ?? 'http://bgutil-provider:4416';
 const VIDEO_FORMAT = 'b[ext=mp4][height<=720]/b[height<=720]/b';
 const AUDIO_FORMAT = 'bestaudio[ext=m4a]/bestaudio';
+/**
+ * `YTDLP_VERBOSE=1` adds `-v`. It is the knob for the next person who has to
+ * explain a 502: yt-dlp's PoToken plugin reports what it asked the provider for
+ * and what came back on stderr, and that output is what turns "YouTube is being
+ * YouTube" into a fixable diagnosis. Off by default (it is loud and slows the
+ * resolve).
+ */
+const VERBOSE = process.env.YTDLP_VERBOSE === '1';
 
 /** yt-dlp can be slow on a cold cache; the resolve itself rarely takes >10 s. */
 const RESOLVE_TIMEOUT_MS = Number(
@@ -170,9 +178,9 @@ function stderrTail(error: unknown): string {
         .join(' | ')
         .trim()
         .split('\n')
-        .slice(-3)
+        .slice(-8)
         .join(' / ')
-        .slice(0, 500);
+        .slice(0, 700);
 }
 
 interface CacheEntry {
@@ -189,7 +197,10 @@ async function attemptResolve(
     clients: string
 ): Promise<ResolvedMedia> {
     const args = [
-        '--no-warnings',
+        // Deliberately no `--no-warnings`: the PoToken plugin's warnings
+        // ("failed to fetch a token") are the difference between a mystery 502
+        // and a diagnosis, and they end up in the error body below.
+        ...(VERBOSE ? ['-v'] : []),
         '--no-playlist',
         '--no-progress',
         '--no-cache-dir',
@@ -217,9 +228,9 @@ async function attemptResolve(
     } catch (error) {
         throw new YouTubeError(
             'YTDLP_FAILED',
-            `yt-dlp could not resolve ${videoId} (clients ${clients}): ${stderrTail(
-                error
-            )}`,
+            `yt-dlp could not resolve ${videoId} (clients ${clients}, pot ${
+                POT_PROVIDER_URL || 'off'
+            }): ${stderrTail(error)}`,
             502
         );
     }
