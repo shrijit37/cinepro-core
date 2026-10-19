@@ -266,12 +266,14 @@ jobs:
           master=$(printf '%s' "$body" | jq -r '.sources[0].url // empty')
           [ -n "$master" ] || { echo "::error::/v1/movies/550 returned no source URL"; exit 1; }
           echo "source: ${master:0:110}…"
-          playlist=$(curl -fsS --max-time 60 -u "$BASIC_AUTH" "$(abs "$master")")
-          variant=$(printf '%s' "$playlist" | grep -v '^#' | head -1)
+          # Playlists go to files: piping 700 KB into `head -1` closes the pipe
+          # early and `pipefail` turns the SIGPIPE into a failed gate.
+          curl -fsS --max-time 60 -u "$BASIC_AUTH" "$(abs "$master")" -o master.m3u8
+          variant=$(awk '!/^#/ && NF { print; exit }' master.m3u8)
           [ -n "$variant" ] || { echo "::error::master playlist listed no variants"; exit 1; }
           echo "variant: ${variant:0:110}…"
-          media=$(curl -fsS --max-time 60 -u "$BASIC_AUTH" "$(abs "$variant")")
-          segment=$(printf '%s' "$media" | grep -v '^#' | head -1)
+          curl -fsS --max-time 60 -u "$BASIC_AUTH" "$(abs "$variant")" -o media.m3u8
+          segment=$(awk '!/^#/ && NF { print; exit }' media.m3u8)
           [ -n "$segment" ] || { echo "::error::media playlist listed no segments"; exit 1; }
           echo "segment: ${segment:0:110}…"
           code=$(curl -s -o seg.bin -w '%{http_code}' --max-time 90 -u "$BASIC_AUTH" "$(abs "$segment")")
