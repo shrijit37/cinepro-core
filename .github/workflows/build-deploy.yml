@@ -230,8 +230,11 @@ jobs:
           echo "authenticated /v1/health -> $code"
           [ "$code" = "200" ] || { echo "::error::authenticated health returned $code"; exit 1; }
           # The resolve is the point of the service: providers are third-party
-          # and slow, so this one gets a long deadline.
-          deadline=$((SECONDS + 180))
+          # and slow, so this one gets a long deadline. VidApi — the only
+          # provider still returning anything — swings between 0.4 s and more
+          # than a minute for the same title, and a resolve that loses that
+          # window answers NO_SOURCES_AVAILABLE, so 180 s was too tight.
+          deadline=$((SECONDS + 420))
           while [ $SECONDS -lt $deadline ]; do
             body=$(curl -fsS --max-time 120 -u "$BASIC_AUTH" "$APP_URL/v1/movies/550" || true)
             # Not a here-string: jq mis-parses a 20 KB body fed that way and
