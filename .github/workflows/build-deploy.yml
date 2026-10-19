@@ -193,7 +193,8 @@ jobs:
           deadline=$((SECONDS + 600))
           while [ $SECONDS -lt $deadline ]; do
             body=$(curl -fsS --max-time 15 -u "$BASIC_AUTH" "$APP_URL/v1/health" || true)
-            version=$(jq -r '.version // empty' <<<"${body:-{}}" 2>/dev/null || true)
+            version=""
+            [ -n "${body:-}" ] && version=$(printf '%s' "$body" | jq -r '.version // empty' 2>/dev/null || true)
             if [ "$version" = "$GITHUB_SHA" ]; then
               echo "health reports $version — gate passed"
               echo "anonymous /v1/health -> $(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$APP_URL/v1/health")"
@@ -223,13 +224,20 @@ jobs:
           deadline=$((SECONDS + 180))
           while [ $SECONDS -lt $deadline ]; do
             body=$(curl -fsS --max-time 120 -u "$BASIC_AUTH" "$APP_URL/v1/movies/550" || true)
-            count=$(jq -r '(.sources // []) | length' <<<"${body:-{}}" 2>/dev/null || echo 0)
-            if [ "${count:-0}" -gt 0 ]; then
+            # Not a here-string: jq mis-parses a 20 KB body fed that way and
+            # exits non-zero while still printing the count, so the `|| 0`
+            # fallback would concatenate "3\n0" and break the numeric test.
+            count=0
+            if [ -n "${body:-}" ]; then
+              count=$(printf '%s' "$body" | jq -r '(.sources // []) | length' 2>/dev/null) || count=0
+            fi
+            case "$count" in ''|*[!0-9]*) count=0 ;; esac
+            if [ "$count" -gt 0 ]; then
               echo "authenticated /v1/movies/550 -> $count source(s)"
-              jq -r '.sources[] | "  \(.quality) \(.provider.name // .provider.id) (\(.type))"' <<<"$body"
+              printf '%s' "$body" | jq -r '.sources[] | "  \(.quality) \(.provider.name // .provider.id) (\(.type))"'
               exit 0
             fi
-            echo "resolve returned ${count:-0} sources, retrying"
+            echo "resolve returned $count sources, retrying"
             sleep 10
           done
           echo "::error::gate failed — /v1/movies/550 returned no sources"
