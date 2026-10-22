@@ -44,6 +44,10 @@ const ALLOWED_PATHS: readonly RegExp[] = [
     /^genre\/(movie|tv)\/list$/,
     /^trending\/(movie|tv|all)\/(day|week)$/,
     /^discover\/(movie|tv)$/,
+    // The catalogue lists a Cinema surface can pick from. `movie/popular` is what the launcher
+    // already reads for its "Popular" row; the rest are the same family, so an allowlist entry
+    // costs nothing and stops the next screen from silently falling back to a per-panel direct key.
+    /^(movie|tv)\/(popular|top_rated|now_playing|upcoming|airing_today|on_the_air)$/,
     /^search\/(multi|movie|tv|person|keyword|company|collection)$/,
     /^movie\/\d+(\/(credits|recommendations|similar|videos|release_dates|images|reviews|keywords|external_ids|watch\/providers))?$/,
     /^tv\/\d+(\/(credits|recommendations|similar|videos|content_ratings|images|reviews|keywords|external_ids|watch\/providers|season\/\d+(\/episode\/\d+)?))?$/,
