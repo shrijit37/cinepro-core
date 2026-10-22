@@ -317,18 +317,26 @@ async function handleYouTube(
         }
     });
 
+    // Forward the **parsed** range, never the raw header. `parseRange` deliberately ignores
+    // shapes it cannot serve without knowing the total upfront (`bytes=-N`), and forwarding those
+    // verbatim is how a suffix probe became a 502 `UPSTREAM_REJECTED`: the origin answered 416 for
+    // a range this route had already decided to treat as "no range".
+    //
+    // An unranged GET is throttled regardless: googlevideo serves a music track at ~250 kbit/s and
+    // closes it short of the length it advertised (measured by this repo's gate: 2.9 MB of 3.4 MB
+    // after 93 s), while `Range: bytes=0-` delivers the same file in ~3 s. Ask for the open-ended
+    // range either way and answer 200 below.
+    const upstreamRange = range
+        ? `bytes=${range.start}-${range.end ?? ''}`
+        : 'bytes=0-';
+
     let upstream: UpstreamFetch;
     try {
         upstream = await openUpstream(
             videoId,
             audio,
             media,
-            // An unranged GET is throttled: googlevideo serves a music track at
-            // ~250 kbit/s and closes it short of the length it advertised
-            // (measured by this repo's gate: 2.9 MB of 3.4 MB after 93 s),
-            // while `Range: bytes=0-` delivers the same file in ~3 s. Ask for
-            // the open-ended range either way and answer 200 below.
-            rangeHeader ?? 'bytes=0-',
+            upstreamRange,
             controller.signal
         );
     } catch (error) {
@@ -371,6 +379,28 @@ async function handleYouTube(
             1000
         ).toFixed(1)} s`
     );
+
+    // A range the origin cannot satisfy is the client's answer, not an upstream failure: 416 with
+    // the total lets a player clamp its next request instead of retrying a 502 that reads like the
+    // media host is down.
+    if (response.status === 416) {
+        await response.body?.cancel().catch(() => undefined);
+        const size = totalFrom(response, resolved);
+        const unsatisfied =
+            response.headers.get('content-range') ??
+            (size ? `bytes */${size}` : null);
+        if (unsatisfied) {
+            reply.header('content-range', unsatisfied);
+        }
+        return sendError(
+            reply,
+            request,
+            416,
+            'RANGE_NOT_SATISFIABLE',
+            `Requested range is outside ${videoId}${size ? ` (${size} bytes)` : ''}`,
+            { requested: rangeHeader ?? null }
+        );
+    }
 
     if (response.status >= 400) {
         // googlevideo explains itself in the body ("expired", "not available",
