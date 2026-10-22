@@ -7,6 +7,7 @@ import { installCookies } from './youtube/cookies.js';
 import { installSourceLiveness } from './sourceLiveness.js';
 import { installTmdbResilience } from './tmdbResilience.js';
 import { registerYouTubeRoutes } from './youtube/routes.js';
+import { registerTmdbRoutes } from './tmdb/routes.js';
 import { knownThirdPartyProxies } from './thirdPartyProxies.js';
 import { streamPatterns } from './streamPatterns.js';
 import type { FastifyInstance } from 'fastify';
@@ -100,6 +101,9 @@ async function main() {
     // server; the framework field is stable and this is the only coupling.
     const { app } = server as unknown as { app: FastifyInstance };
     registerYouTubeRoutes(app);
+    // The launcher's metadata half (rails, details, cast, search). Until this existed the panel
+    // carried its own TMDB key and talked to api.themoviedb.org directly.
+    registerTmdbRoutes(app);
 
     // Turns a TMDB transport failure that outlasted the fetch retries into a
     // 503 UPSTREAM_UNAVAILABLE instead of the framework's generic 500, so the
