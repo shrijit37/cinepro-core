@@ -12,9 +12,12 @@
  *
  * 1. **Allowlisted shapes.** Only the paths a launcher needs are forwarded; anything else is a 404
  *    with the same envelope shape the framework uses, so the app cannot tell a typo from a policy.
- * 2. **Allowlisted parameters.** `api_key`, `session_id`, `guest_session_id` and `append_to_response`
- *    are dropped/no-pass: the first two are credentials, and `append_to_response` turns one small
- *    request into an arbitrary fan-out against the account's rate budget.
+ * 2. **Allowlisted parameters.** `api_key`, `session_id` and `guest_session_id` never leave this
+ *    process: they are credentials. `append_to_response` is rewritten to the two sub-resources the
+ *    panel's DTOs actually consume (`release_dates` on a movie, `content_ratings` on a show) and
+ *    anything else in it is dropped. That matters because an unfiltered value is an arbitrary
+ *    fan-out against the account's rate budget, while these two are exactly the fields the details
+ *    screen renders and there is no second round trip on a 1.4 GHz A53 to pay for them.
  * 3. **TTL'd cache.** Trending changes on the hour, a title's details on the day, a search string
  *    whenever — each class gets its own TTL, so a panel that walks its rails costs TMDB almost
  *    nothing and a second panel costs nothing at all.
@@ -55,9 +58,29 @@ const DROPPED_PARAMS = new Set([
     'api_key',
     'session_id',
     'guest_session_id',
-    'append_to_response',
     'callback'
 ]);
+
+/**
+ * The only appends this deployment will carry. TMDB's own endpoint accepts a comma-separated list
+ * of sub-resources and turns one small request into several upstream ones; the panel only reads
+ * these two (the age certificate on a details screen), so the request is narrowed to them instead
+ * of accepting whatever the caller asks for.
+ */
+const APPENDABLE = new Set(['release_dates', 'content_ratings']);
+
+/** Filters a raw `append_to_response` value to the allowlist, or null when nothing survives. */
+function filterAppend(raw: unknown): string | null {
+    if (typeof raw !== 'string') {
+        return null;
+    }
+    const names = raw
+        .split(',')
+        .map((name) => name.trim())
+        .filter((name) => APPENDABLE.has(name));
+    const unique = [...new Set(names)];
+    return unique.length > 0 ? unique.join(',') : null;
+}
 
 interface CacheEntry {
     body: string;
@@ -148,7 +171,12 @@ function splitPath(raw: string): string[] | null {
         return null;
     }
     const segments = cleaned.split('/');
-    if (segments.some((segment) => !SEGMENT.test(segment) || segment === '.' || segment === '..')) {
+    if (
+        segments.some(
+            (segment) =>
+                !SEGMENT.test(segment) || segment === '.' || segment === '..'
+        )
+    ) {
         return null;
     }
     return segments;
@@ -185,19 +213,40 @@ export function registerTmdbRoutes(app: FastifyInstance): void {
         const wildcard = (request.params as { '*': string })['*'] ?? '';
         const segments = splitPath(wildcard);
         if (!segments) {
-            return sendError(reply, request, 404, 'TMDB_PATH_NOT_ALLOWED', 'No such metadata path');
+            return sendError(
+                reply,
+                request,
+                404,
+                'TMDB_PATH_NOT_ALLOWED',
+                'No such metadata path'
+            );
         }
         const path = segments.join('/');
         if (!ALLOWED_PATHS.some((pattern) => pattern.test(path))) {
-            return sendError(reply, request, 404, 'TMDB_PATH_NOT_ALLOWED', 'No such metadata path', {
-                path
-            });
+            return sendError(
+                reply,
+                request,
+                404,
+                'TMDB_PATH_NOT_ALLOWED',
+                'No such metadata path',
+                {
+                    path
+                }
+            );
         }
 
         // The panel's language/region ride through the query, and TMDB defaults to en-US otherwise.
-        const query = request.query as Record<string, unknown>;
+        const query = { ...(request.query as Record<string, unknown>) };
         if (!query.language) {
             query.language = 'en-US';
+        }
+        // Rewrite the append list before it reaches the cache key or TMDB: an unfiltered value is
+        // unbounded fan-out, and a dropped one would make two different responses share a key.
+        const append = filterAppend(query.append_to_response);
+        if (append) {
+            query.append_to_response = append;
+        } else {
+            delete query.append_to_response;
         }
         const suffix = queryString(query);
         const key = suffix ? `${path}?${suffix}` : path;
@@ -252,10 +301,17 @@ export function registerTmdbRoutes(app: FastifyInstance): void {
                       ? 'TMDB_UNAUTHORIZED'
                       : 'TMDB_UPSTREAM_ERROR';
             console.warn(`[TMDB] ${path} -> ${response.status} (${code})`);
-            return sendError(reply, request, response.status === 404 ? 404 : 502, code, body.slice(0, 200) || 'TMDB rejected the request', {
-                path,
-                status: response.status
-            });
+            return sendError(
+                reply,
+                request,
+                response.status === 404 ? 404 : 502,
+                code,
+                body.slice(0, 200) || 'TMDB rejected the request',
+                {
+                    path,
+                    status: response.status
+                }
+            );
         }
 
         cachePut(key, body, ttl);
