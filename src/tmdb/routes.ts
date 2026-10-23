@@ -277,11 +277,12 @@ async function loadAndCache(
     path: string,
     suffix: string,
     ttl: number,
-    key: string
+    key: string,
+    trim: boolean
 ): Promise<UpstreamResult> {
     const result = await fetchUpstream(apiKey, path, suffix);
     if (result.status >= 200 && result.status < 300) {
-        cachePut(key, result.body, ttl);
+        cachePut(key, trim ? trimAppended(result.body) : result.body, ttl);
     }
     return result;
 }
@@ -295,20 +296,135 @@ function refreshInBackground(
     path: string,
     suffix: string,
     ttl: number,
-    key: string
+    key: string,
+    trim: boolean
 ): void {
     if (refreshing.has(key)) {
         return;
     }
     refreshing.add(key);
-    void loadAndCache(apiKey, path, suffix, ttl, key)
+    void loadAndCache(apiKey, path, suffix, ttl, key, trim)
         .catch(() => undefined)
         .finally(() => refreshing.delete(key));
 }
 
-/** Parses `append_to_response`, language default and query into the cache key's suffix. */
-function normaliseQuery(raw: Record<string, unknown>): string {
+/** Cast entries kept when the caller asks for a trimmed body; a panel row draws 20. */
+const TRIM_CAST = 30;
+const TRIM_CREW = 10;
+const TRIM_RECOMMENDATIONS = 20;
+
+/**
+ * Shrinks the credit lists inside an already-fetched details body.
+ *
+ * Measured reason, not tidiness: a long-running show's `aggregate_credits` is 437 KB raw / 87 KB
+ * gzipped, and the launcher draws twenty names on a 1 GB television that then parses all of it.
+ * Trimming happens *after* TMDB answers and before the body is cached, so the account pays for one
+ * upstream read either way and every later reader gets the small copy.
+ *
+ * Only lists are cut, never reordered except aggregate credits (which are ranked by episode count,
+ * because TMDB's own order is not by prominence). Anything the caller needs in full it can still
+ * read from the dedicated sub-resource endpoint.
+ */
+function trimAppended(body: string): string {
+    try {
+        const parsed = JSON.parse(body) as Record<string, unknown>;
+
+        // A cast row draws a name, a face and a character. `credit_id` and TMDB's other bookkeeping
+        // fields are the bulk of a long show's aggregate list (382 KB of 367 KB measured), and the
+        // panel has no use for a single one of them.
+        const credits = parsed.credits as
+            | {
+                  cast?: Record<string, unknown>[];
+                  crew?: Record<string, unknown>[];
+              }
+            | undefined;
+        if (credits?.cast) {
+            credits.cast = credits.cast.slice(0, TRIM_CAST).map((person) => ({
+                id: person.id,
+                name: person.name,
+                character: person.character,
+                profile_path: person.profile_path,
+                order: person.order
+            }));
+        }
+        if (credits?.crew) {
+            credits.crew = credits.crew.slice(0, TRIM_CREW).map((person) => ({
+                id: person.id,
+                name: person.name,
+                job: person.job,
+                department: person.department,
+                profile_path: person.profile_path
+            }));
+        }
+
+        // Aggregate credits are ranked by episode count (TMDB's order is not by prominence) and cut
+        // to the three roles a person is most associated with — an actor in 59 episodes of a
+        // long-running show carries a hundred role entries, one per character they ever voiced.
+        const aggregate = parsed.aggregate_credits as
+            | { cast?: Record<string, unknown>[]; crew?: unknown[] }
+            | undefined;
+        // The crew half of aggregate credits is 1003 entries for a one-cour anime (measured) and
+        // the panel draws none of it: the cast row is the only consumer.
+        if (aggregate?.crew) {
+            aggregate.crew = [];
+        }
+        if (aggregate?.cast) {
+            aggregate.cast = [...aggregate.cast]
+                .sort(
+                    (a, b) =>
+                        ((b.total_episode_count as number) ?? 0) -
+                        ((a.total_episode_count as number) ?? 0)
+                )
+                .slice(0, TRIM_CAST)
+                .map((person) => ({
+                    id: person.id,
+                    name: person.name,
+                    profile_path: person.profile_path,
+                    order: person.order,
+                    total_episode_count: person.total_episode_count,
+                    roles: ((person.roles as Record<string, unknown>[]) ?? [])
+                        .slice(0, 3)
+                        .map((role) => ({
+                            character: role.character,
+                            episode_count: role.episode_count
+                        }))
+                }));
+        }
+
+        const recommendations = parsed.recommendations as
+            | { results?: unknown[] }
+            | undefined;
+        if (
+            recommendations?.results &&
+            recommendations.results.length > TRIM_RECOMMENDATIONS
+        ) {
+            recommendations.results = recommendations.results.slice(
+                0,
+                TRIM_RECOMMENDATIONS
+            );
+        }
+        return JSON.stringify(parsed);
+    } catch {
+        // A body we cannot parse is passed through untouched: trimming is an optimisation, and
+        // breaking the response to save bytes is not a trade this endpoint makes.
+        return body;
+    }
+}
+
+/**
+ * Parses `append_to_response`, language default and query into the cache key's suffix.
+ *
+ * `trim_credits=1` is answered here and never forwarded to TMDB — it is a policy of this
+ * deployment, and TMDB has no such parameter. It stays in the cache key, though: a trimmed body and
+ * a full one are different answers under the same path.
+ */
+function normaliseQuery(raw: Record<string, unknown>): {
+    suffix: string;
+    trim: boolean;
+} {
     const query: Record<string, unknown> = { ...raw };
+    const trim = String(query.trim_credits ?? '') === '1';
+    delete query.trim_credits;
     if (!query.language) {
         query.language = 'en-US';
     }
@@ -318,13 +434,24 @@ function normaliseQuery(raw: Record<string, unknown>): string {
     } else {
         delete query.append_to_response;
     }
-    return queryString(query);
+    const suffix = queryString(query);
+    if (!trim) {
+        return { suffix, trim };
+    }
+    return {
+        suffix: suffix ? `${suffix}&trim_credits=1` : 'trim_credits=1',
+        trim
+    };
 }
 
 /** Validates a path against the allowlist and returns its cache key, or null. */
-function warmKeyFor(
-    rawPath: string
-): { path: string; suffix: string; ttl: number; key: string } | null {
+function warmKeyFor(rawPath: string): {
+    path: string;
+    suffix: string;
+    ttl: number;
+    key: string;
+    trim: boolean;
+} | null {
     const parsed = new URL(rawPath, 'http://warm.invalid');
     const segments = splitPath(parsed.pathname);
     if (!segments) {
@@ -334,14 +461,15 @@ function warmKeyFor(
     if (!ALLOWED_PATHS.some((pattern) => pattern.test(path))) {
         return null;
     }
-    const suffix = normaliseQuery(
+    const { suffix, trim } = normaliseQuery(
         Object.fromEntries(parsed.searchParams.entries())
     );
     return {
         path,
         suffix,
         ttl: ttlMsFor(path),
-        key: suffix ? `${path}?${suffix}` : path
+        key: suffix ? `${path}?${suffix}` : path,
+        trim
     };
 }
 
@@ -391,7 +519,8 @@ export function registerTmdbRoutes(app: FastifyInstance): void {
                     target.path,
                     target.suffix,
                     target.ttl,
-                    target.key
+                    target.key,
+                    target.trim
                 );
             }
         }
@@ -440,14 +569,16 @@ export function registerTmdbRoutes(app: FastifyInstance): void {
         // The panel's language/region ride through the query, and TMDB defaults to en-US otherwise.
         // The append list is rewritten before it reaches the cache key or TMDB: an unfiltered value
         // is unbounded fan-out, and a dropped one would make two different responses share a key.
-        const suffix = normaliseQuery(request.query as Record<string, unknown>);
+        const { suffix, trim } = normaliseQuery(
+            request.query as Record<string, unknown>
+        );
         const key = suffix ? `${path}?${suffix}` : path;
         const ttl = ttlMsFor(path);
 
         const hit = cacheGet(key);
         if (hit) {
             if (hit.stale) {
-                refreshInBackground(apiKey, path, suffix, ttl, key);
+                refreshInBackground(apiKey, path, suffix, ttl, key, trim);
             }
             return reply
                 .code(200)
@@ -503,7 +634,8 @@ export function registerTmdbRoutes(app: FastifyInstance): void {
             );
         }
 
-        cachePut(key, body, ttl);
+        const answer = trim ? trimAppended(body) : body;
+        cachePut(key, answer, ttl);
         return reply
             .code(200)
             .type('application/json')
@@ -511,6 +643,6 @@ export function registerTmdbRoutes(app: FastifyInstance): void {
                 'cache-control': `public, max-age=${Math.floor(ttl / 1000)}`,
                 'x-cinepro-cache': 'miss'
             })
-            .send(body);
+            .send(answer);
     });
 }
