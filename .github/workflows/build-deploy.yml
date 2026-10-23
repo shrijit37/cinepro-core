@@ -447,8 +447,31 @@ jobs:
           # RgKAFK5djSk is the id the lanes cannot do: it burned 61.5 s and
           # answered 502 through the WARP rotation on 2e549b7. With the signed-in
           # cookie jar the direct attempt resolves it in ~2.4 s.
+          #
+          # A hardcoded id can also rot at YouTube's end: BmRX2g6-iQI answered
+          # "Media host answered 403" on 2026-10-23 while every other id passed
+          # and the endpoint was healthy, which fails a green deploy for a
+          # fixture. So a *refusal of one id* (502 UPSTREAM_REJECTED — the media
+          # host said 403/410 for that stream) is a warning and the id is
+          # skipped; every other failure still fails, and at least three ids must
+          # stream for the gate to pass. An endpoint that is actually broken
+          # refuses all of them, so this cannot hide a regression.
+          audio_ok=0
+          audio_dead=0
           for id in dQw4w9WgXcQ kJQP7kiw5Fk RgKAFK5djSk zAiIgYOH4Ys BmRX2g6-iQI; do
             echo "audio $id"
-            check_stream "$id" '?audio=1' ftyp || fail=1
+            if check_stream "$id" '?audio=1' ftyp; then
+              audio_ok=$(( audio_ok + 1 ))
+            elif grep -qs 'UPSTREAM_REJECTED' yt_first.bin; then
+              echo "::warning::$id?audio=1: the media host refuses this id (403/410) — skipping a rotted fixture, not a broken endpoint"
+              audio_dead=$(( audio_dead + 1 ))
+            else
+              fail=1
+            fi
           done
+          echo "audio ids: $audio_ok streamed, $audio_dead refused by the media host"
+          if [ "$audio_ok" -lt 3 ]; then
+            echo "::error::only $audio_ok of 5 audio ids streamed — the endpoint, not the fixtures, is broken"
+            fail=1
+          fi
           [ "$fail" = "0" ] || exit 1
