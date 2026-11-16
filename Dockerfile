@@ -75,11 +75,20 @@ RUN apk add --no-cache python3 py3-pip && \
         "bgutil-ytdlp-pot-provider==${BGUTIL_VERSION}" && \
     rm -rf /root/.cache/pip
 
+# curl backs the Docker HEALTHCHECK below; Coolify uses it to gate traffic.
+RUN apk add --no-cache curl
+
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
 USER nodejs
 
 EXPOSE ${PORT}
+
+# Readiness gate: 200 only while both the app and the Supabase gateway answer.
+# --start-period covers provider discovery at boot; --fail makes a 503 flap the
+# container to unhealthy with no shell-side body parsing.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl --fail --silent --show-error "http://127.0.0.1:${PORT}/health" || exit 1
 
 CMD ["node", "dist/server.js"]

@@ -7,6 +7,7 @@ import { installCookies } from './youtube/cookies.js';
 import { installSourceLiveness } from './sourceLiveness.js';
 import { installTmdbResilience } from './tmdbResilience.js';
 import { registerYouTubeRoutes } from './youtube/routes.js';
+import { registerHealthRoutes } from './health.js';
 import { registerTmdbRoutes } from './tmdb/routes.js';
 import { knownThirdPartyProxies } from './thirdPartyProxies.js';
 import { streamPatterns } from './streamPatterns.js';
@@ -101,6 +102,11 @@ async function main() {
     // hook to attach routes, so reach into it rather than re-implementing the
     // server; the framework field is stable and this is the only coupling.
     const { app } = server as unknown as { app: FastifyInstance };
+    // The framework's catch-all is a not-found handler installed in its
+    // constructor, which Fastify only runs for unmatched routes. Registering a
+    // concrete /health here (before start(), like the YouTube routes) makes it
+    // take precedence and gives Coolify a real readiness gate.
+    registerHealthRoutes(app);
     // A details read with the cast, trailer and recommendations appended is ~100 KB of JSON and
     // the panel pays for every byte over Wi-Fi. Gzip takes it to ~11 KB. Installed as an onSend
     // hook rather than a plugin, because the framework registered its routes before we could
