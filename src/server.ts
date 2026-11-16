@@ -8,8 +8,10 @@ import { installSourceLiveness } from './sourceLiveness.js';
 import { installTmdbResilience } from './tmdbResilience.js';
 import { registerYouTubeRoutes } from './youtube/routes.js';
 import { registerHealthRoutes } from './health.js';
+import { registerTmdbRoutes } from './tmdb/routes.js';
 import { knownThirdPartyProxies } from './thirdPartyProxies.js';
 import { streamPatterns } from './streamPatterns.js';
+import { installCompression } from './compress.js';
 import type { FastifyInstance } from 'fastify';
 
 // Must be installed before the server issues its first upstream request.
@@ -105,7 +107,15 @@ async function main() {
     // concrete /health here (before start(), like the YouTube routes) makes it
     // take precedence and gives Coolify a real readiness gate.
     registerHealthRoutes(app);
+    // A details read with the cast, trailer and recommendations appended is ~100 KB of JSON and
+    // the panel pays for every byte over Wi-Fi. Gzip takes it to ~11 KB. Installed as an onSend
+    // hook rather than a plugin, because the framework registered its routes before we could
+    // touch the instance and an `onRoute`-based plugin covers none of them.
+    installCompression(app);
     registerYouTubeRoutes(app);
+    // The launcher's metadata half (rails, details, cast, search). Until this existed the panel
+    // carried its own TMDB key and talked to api.themoviedb.org directly.
+    registerTmdbRoutes(app);
 
     // Turns a TMDB transport failure that outlasted the fetch retries into a
     // 503 UPSTREAM_UNAVAILABLE instead of the framework's generic 500, so the
