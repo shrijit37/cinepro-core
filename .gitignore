@@ -146,3 +146,8 @@ vite.config.ts.timestamp-*
 ignore/
 
 **/test.ts
+# dotenvx private keys — stored in GitHub Actions, never committed
+.env.keys
+
+# dotenvx-encrypted env — safe to commit; private key lives in GitHub Actions
+!.env.production
