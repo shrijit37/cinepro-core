@@ -7,6 +7,7 @@ import { installCookies } from './youtube/cookies.js';
 import { installSourceLiveness } from './sourceLiveness.js';
 import { installTmdbResilience } from './tmdbResilience.js';
 import { registerYouTubeRoutes } from './youtube/routes.js';
+import { registerHealthRoutes } from './health.js';
 import { knownThirdPartyProxies } from './thirdPartyProxies.js';
 import { streamPatterns } from './streamPatterns.js';
 import type { FastifyInstance } from 'fastify';
@@ -99,6 +100,11 @@ async function main() {
     // hook to attach routes, so reach into it rather than re-implementing the
     // server; the framework field is stable and this is the only coupling.
     const { app } = server as unknown as { app: FastifyInstance };
+    // The framework's catch-all is a not-found handler installed in its
+    // constructor, which Fastify only runs for unmatched routes. Registering a
+    // concrete /health here (before start(), like the YouTube routes) makes it
+    // take precedence and gives Coolify a real readiness gate.
+    registerHealthRoutes(app);
     registerYouTubeRoutes(app);
 
     // Turns a TMDB transport failure that outlasted the fetch retries into a
