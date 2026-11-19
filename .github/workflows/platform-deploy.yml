@@ -10,6 +10,6 @@ jobs:
     with:
       kind: container
       app: cinepro-core
-      health-path: /v1/health
-      health-status: operational
+      health_path: /v1/health
+      health_status: operational
     secrets: inherit
