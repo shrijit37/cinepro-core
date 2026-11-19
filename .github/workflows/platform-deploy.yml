@@ -1,0 +1,15 @@
+name: Deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    uses: shrijit37/platform/.github/workflows/deploy.yml@main
+    with:
+      kind: container
+      app: cinepro-core
+      health-path: /v1/health
+      health-status: operational
+    secrets: inherit
