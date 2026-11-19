@@ -10,6 +10,7 @@ jobs:
     with:
       kind: container
       app: cinepro-core
+      test_command: npm run build
       health_path: /v1/health
       health_status: operational
     secrets: inherit
